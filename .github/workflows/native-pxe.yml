@@ -2,6 +2,12 @@ name: Native Debian 13 PXE
 on:
   push:
   workflow_dispatch:
+    inputs:
+      source:
+        description: Exact PXE Tools commit
+        required: false
+        default: fb83ecceed432d10cdcc72e6e9df6a246722d182
+        type: string
 
 permissions:
   contents: read
@@ -11,14 +17,16 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 55
     env:
-      PXE_SOURCE_COMMIT: fb83ecceed432d10cdcc72e6e9df6a246722d182
+      PXE_SOURCE_COMMIT: ${{ inputs.source || 'fb83ecceed432d10cdcc72e6e9df6a246722d182' }}
       PXE_CLOUD_SHA512: 37cb32b320820417eb04b335afcf489bfb4cecce4a957190d09cb2bffbe02b56a1cadd62d78c6ead92aa7839d5ea65e4260f994bbb4b54490df59fdf11ee1d97
     steps:
+      - name: Validate the full source revision
+        run: '[[ "$PXE_SOURCE_COMMIT" =~ ^[a-f0-9]{40}$ ]]'
       - name: Check out the exact PXE Tools draft
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           repository: williamboglietti/pxe-tools
-          ref: fb83ecceed432d10cdcc72e6e9df6a246722d182
+          ref: ${{ env.PXE_SOURCE_COMMIT }}
           persist-credentials: false
           path: pxe-tools
       - name: Build the native test package and Rust binary
