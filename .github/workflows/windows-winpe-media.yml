@@ -1,4 +1,4 @@
-name: Prepare Windows PXE qualification media
+name: Windows 11 first boot from PXE
 on:
   workflow_dispatch:
     inputs:
@@ -11,7 +11,7 @@ permissions:
 jobs:
   prepare:
     runs-on: windows-2025
-    timeout-minutes: 40
+    timeout-minutes: 65
     env:
       PXE_SOURCE: ${{ inputs.source }}
     steps:
@@ -24,6 +24,13 @@ jobs:
           repository: williamboglietti/pxe-tools
           ref: ${{ inputs.source }}
           persist-credentials: false
+      - name: Start Linux on the same disposable runner
+        shell: pwsh
+        run: |
+          wsl.exe --install --distribution Ubuntu-24.04 --no-launch --web-download
+          if ($LASTEXITCODE -ne 0) { throw 'Installing the WSL guest failed.' }
+          wsl.exe --distribution Ubuntu-24.04 --user root --exec /bin/bash -lc 'set -e; test -c /dev/net/tun; test -c /dev/kvm; apt-get -qq update; DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends docker.io iproute2; service docker start; docker info --format "{{.OSType}}" | grep -Fx linux'
+          if ($LASTEXITCODE -ne 0) { throw 'A compatible Linux Docker host was not available in WSL 2.' }
       - name: Verify and prepare the real media in the runner temporary directory
         shell: pwsh
         run: |
@@ -77,6 +84,48 @@ jobs:
             python tests/integration/verify_windows_pxe_deployment.py --case "$output\case.json" --iso "$iso" --winpe "$output\boot\boot.wim" --boot-root "$output\boot"
             if ($LASTEXITCODE -ne 0) { throw 'Prepared media failed verification.' }
             Write-Output 'Official Windows 11 Enterprise evaluation ISO and customized WinPE verified.'
+            Move-Item -LiteralPath $iso -Destination (Join-Path $output 'windows.iso')
+            $ipxeArchive = Join-Path $temp 'ipxe.tar.gz'
+            Fetch 'https://github.com/ipxe/ipxe/releases/download/v2.0.0/ipxeboot.tar.gz' $ipxeArchive
+            if ((Get-FileHash -LiteralPath $ipxeArchive -Algorithm SHA256).Hash -ne '01a526d4cc791fc30362259c609d6c506cc64a7bdff51b9a5eb788354e17eee1') { throw 'Signed iPXE archive differs from the approved hash.' }
+            $ipxe = (New-Item -ItemType Directory -Path (Join-Path $output 'ipxe')).FullName
+            tar.exe -xzf $ipxeArchive -C $ipxe --strip-components 2 ipxeboot/x86_64-sb/ipxe-shim.efi ipxeboot/x86_64-sb/ipxe.efi
+            if ($LASTEXITCODE -ne 0) { throw 'Could not extract the two signed iPXE files.' }
+            $manifest = Join-Path $output 'case.json'
+            $case = Get-Content -LiteralPath $manifest -Raw | ConvertFrom-Json -AsHashtable
+            $case.ipxe_sha256 = @{}
+            foreach ($efi in @('ipxe-shim.efi','ipxe.efi')) {
+              $case.ipxe_sha256[$efi] = (Get-FileHash -LiteralPath (Join-Path $ipxe $efi) -Algorithm SHA256).Hash.ToLowerInvariant()
+            }
+            $case | ConvertTo-Json | Set-Content -LiteralPath $manifest -Encoding Ascii
+
+            $media = (wsl.exe -d Ubuntu-24.04 --exec wslpath -a -u "$output").Trim()
+            if ($LASTEXITCODE -ne 0 -or $media -notmatch '^/mnt/[a-z]/') { throw 'The isolated media path could not be shared with WSL.' }
+            $script = Join-Path $temp 'run-pxe.sh'
+            @'
+            #!/usr/bin/env bash
+            set -euo pipefail
+            pxe_source="$1"
+            pxe_media="$2"
+            pxe_checkout=$(mktemp -d /var/tmp/pxe-windows-source.XXXXXXXX)
+            git -C "$pxe_checkout" init -q
+            git -C "$pxe_checkout" fetch --depth 1 https://github.com/williamboglietti/pxe-tools "$pxe_source"
+            git -C "$pxe_checkout" checkout --detach FETCH_HEAD
+            cd "$pxe_checkout"
+            test "$(git rev-parse HEAD)" = "$pxe_source"
+            export PXE_RUST_GUIDED_DOCKER_IMAGE="pxe-guided-${pxe_source:0:10}:local"
+            export PXE_NATIVE_PXE_IMAGE="pxe-native-e2e-${pxe_source:0:10}:local"
+            docker build --target rust-guided -f docker/pxe-tools/Dockerfile --tag "$PXE_RUST_GUIDED_DOCKER_IMAGE" .
+            docker build --tag "$PXE_NATIVE_PXE_IMAGE" - <<'DOCKERFILE'
+            FROM debian:13-slim
+            RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl dnsmasq-base python3 qemu-system-x86 qemu-utils && rm -rf /var/lib/apt/lists/*
+            DOCKERFILE
+            export PXE_NATIVE_PXE_TEST=1 PXE_NATIVE_PXE_BACKEND=rust-docker PXE_NATIVE_PXE_ARCH=amd64 PYTHONUNBUFFERED=1
+            python3 tests/integration/test_windows_pxe_isolated.py "$pxe_media"
+            '@ -replace "`r`n","`n" | Set-Content -LiteralPath $script -Encoding utf8NoBOM -NoNewline
+            $linuxScript = (wsl.exe -d Ubuntu-24.04 --exec wslpath -a -u "$script").Trim()
+            wsl.exe -d Ubuntu-24.04 --user root --exec /bin/bash "$linuxScript" $env:PXE_SOURCE "$media"
+            if ($LASTEXITCODE -ne 0) { throw 'The isolated Windows PXE deployment did not pass.' }
           } finally {
             Remove-Item -LiteralPath $temp -Recurse -Force
           }
