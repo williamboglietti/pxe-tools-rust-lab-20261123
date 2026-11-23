@@ -1,0 +1,41 @@
+name: Rust monitor distribution
+on:
+  workflow_dispatch:
+    inputs:
+      source:
+        description: Exact PXE Tools commit
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  packages:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            architecture: amd64
+          - runner: ubuntu-24.04-arm
+            architecture: arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    env:
+      PXE_SOURCE_COMMIT: ${{ inputs.source }}
+      PXE_ARCH: ${{ matrix.architecture }}
+    steps:
+      - name: Validate the source revision
+        run: '[[ "$PXE_SOURCE_COMMIT" =~ ^[a-f0-9]{40}$ ]]'
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: williamboglietti/pxe-tools
+          ref: ${{ env.PXE_SOURCE_COMMIT }}
+          persist-credentials: false
+      - name: Build complete packages and verify opt-in and PHP fallback
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$PXE_SOURCE_COMMIT"
+          bash tests/integration/test_rust_monitor_distribution.sh "$PXE_ARCH"
