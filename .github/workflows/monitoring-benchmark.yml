@@ -1,6 +1,11 @@
 name: Debian 13 amd64 1 GiB monitoring benchmark
 on:
   workflow_dispatch:
+    inputs:
+      require_kvm:
+        description: Skip measurement unless KVM is available
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -24,7 +29,35 @@ jobs:
           ref: fb83ecceed432d10cdcc72e6e9df6a246722d182
           path: pxe-tools
           persist-credentials: false
+      - name: Check whether this runner can create a KVM guest
+        id: accelerator
+        shell: bash
+        run: |
+          set -euo pipefail
+          mode=tcg
+          if [ -c /dev/kvm ]; then
+              kvm_gid=$(stat -c '%g' /dev/kvm)
+              if sudo -u "$(id -un)" -g "#$kvm_gid" -- python3 - <<'PY'
+          import fcntl
+          import os
+
+          kvm = os.open('/dev/kvm', os.O_RDWR)
+          assert fcntl.ioctl(kvm, 0xAE00) == 12
+          guest = fcntl.ioctl(kvm, 0xAE01, 0)
+          os.close(guest)
+          os.close(kvm)
+          print('KVM can create a guest under the unprivileged runner user.')
+          PY
+              then
+                  mode=kvm
+                  printf 'PXE_KVM_GID=%s\n' "$kvm_gid" >> "$GITHUB_ENV"
+              fi
+          else
+              printf '%s\n' 'This runner does not expose /dev/kvm.'
+          fi
+          printf 'mode=%s\n' "$mode" >> "$GITHUB_OUTPUT"
       - name: Prepare Debian and build Rust in release mode
+        if: ${{ !inputs.require_kvm || steps.accelerator.outputs.mode == 'kvm' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -47,18 +80,23 @@ jobs:
           xorriso -as mkisofs -quiet -volid cidata -joliet -rock -o "$lab/seed.iso" "$lab/seed"
           qemu-img create -q -f qcow2 -F qcow2 -b "$lab/debian.qcow2" "$lab/guest.qcow2" 8G
       - name: Measure PSS, PSI, latency and throughput in the 1 GiB guest
+        if: ${{ !inputs.require_kvm || steps.accelerator.outputs.mode == 'kvm' }}
+        env:
+          PXE_ACCEL: ${{ steps.accelerator.outputs.mode }}
         shell: bash
         run: |
           set -euo pipefail
           lab="$RUNNER_TEMP/pxe-monitor"
+          launcher=()
           accel=(-accel tcg)
-          if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
+          if [ "$PXE_ACCEL" = kvm ]; then
+              launcher=(sudo -u "$(id -un)" -g "#$PXE_KVM_GID" --)
               accel=(-accel kvm -cpu host)
           fi
           printf 'QEMU mode %s\n' "${accel[*]}" | tee benchmark-output/context.txt
           qemu-system-x86_64 --version | head -1 | tee -a benchmark-output/context.txt
           status=0
-          timeout 18m qemu-system-x86_64 -machine pc "${accel[@]}" -m 1024 -smp 2 \
+          timeout 18m "${launcher[@]}" qemu-system-x86_64 -machine pc "${accel[@]}" -m 1024 -smp 2 \
               -display none -monitor none -no-reboot -boot c \
               -serial "file:$lab/kernel.log" -serial stdio \
               -drive "file=$lab/guest.qcow2,if=virtio,format=qcow2" \
@@ -92,6 +130,7 @@ jobs:
               assert row['p95_ms'] > 0 and row['requetes_par_seconde'] > 0, row
           PY
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        if: ${{ !inputs.require_kvm || steps.accelerator.outputs.mode == 'kvm' }}
         with:
           name: pxe-monitor-debian13-1gib
           path: benchmark-output/
