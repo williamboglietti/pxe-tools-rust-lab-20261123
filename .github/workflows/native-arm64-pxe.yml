@@ -33,7 +33,8 @@ jobs:
           test "$(uname -m)" = aarch64
           inputs=$(mktemp -d "$RUNNER_TEMP/arm64-appliance.XXXXXXXX")
           image="pxe-native-e2e-${PXE_SOURCE:0:10}:local"
-          python3 packaging/native/build-local-package.py "$inputs/native.deb" --architecture arm64 --version 0.0.1~local1
+          python3 packaging/native/build-apt-package-candidate.py "$inputs/native.deb" --architecture arm64 \
+            --version '0.1.0~beta12' --maintainer 'PXE Tools <security@pxetools.com>'
           dpkg-deb --field "$inputs/native.deb" Package Version Architecture
           sha256sum "$inputs/native.deb"
           docker build --platform linux/arm64 --tag "$image" -f - "$inputs" <<'DOCKERFILE'
@@ -50,6 +51,7 @@ jobs:
             sudo mknod /dev/net/tun c 10 200
           fi
           sudo -- env PXE_NATIVE_PXE_TEST=1 PXE_NATIVE_PXE_ARCH=arm64 PXE_NATIVE_PXE_IMAGE="$PXE_NATIVE_PXE_IMAGE" \
+            PXE_NATIVE_PXE_PACKAGE=pxe-tools PXE_NATIVE_PXE_VERSION=0.1.0~beta12 \
             PYTHONUNBUFFERED=1 python3 tests/integration/test_native_discovery_install_chain_isolated.py 2>&1 | tee pxe-arm64.log
       - name: Archive the isolated test log
         if: always()
