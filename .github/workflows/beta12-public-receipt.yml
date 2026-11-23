@@ -1,0 +1,87 @@
+name: Verify released beta 12 APT and Docker on Debian 13
+
+on:
+  workflow_dispatch:
+    inputs:
+      manifest_commit:
+        description: Exact main commit approving beta 12
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  receipt:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - architecture: amd64
+            runner: ubuntu-24.04
+          - architecture: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    env:
+      MANIFEST_COMMIT: ${{ inputs.manifest_commit }}
+      ARCH: ${{ matrix.architecture }}
+    steps:
+      - name: Verify the public APT index and exact package bytes
+        run: |
+          set -euo pipefail
+          [[ "$MANIFEST_COMMIT" =~ ^[a-f0-9]{40}$ ]]
+          receipt=$(mktemp -d "$RUNNER_TEMP/apt-beta12.XXXXXXXX")
+          chmod 0755 "$receipt"
+          source="https://raw.githubusercontent.com/williamboglietti/pxe-tools/$MANIFEST_COMMIT/packaging/ci"
+          curl --proto '=https' -fsS --retry 3 "$source/release-manifest.json" -o "$receipt/manifest.json"
+          curl --proto '=https' -fsS --retry 3 "$source/pxe-tools-next-public.gpg" -o "$receipt/keyring.gpg"
+          curl --proto '=https' -fsS --retry 3 https://packages.pxetools.com/pxe-tools-archive-keyring.gpg -o "$receipt/served-keyring.gpg"
+          cmp "$receipt/keyring.gpg" "$receipt/served-keyring.gpg"
+          jq -er --arg arch "$ARCH" '.version, (if $arch == "arm64" then .arm64_package_sha256 else .package_sha256 end), .ansible_package_sha256' \
+            "$receipt/manifest.json" > "$receipt/expected.txt"
+          docker run --rm -i --platform "linux/$ARCH" --mount "type=bind,src=$receipt,dst=/receipt,readonly" \
+            debian:13-slim bash -s -- "$ARCH" <<'DEBIAN'
+          set -euo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          . /etc/os-release
+          test "$ID:$VERSION_ID:$(dpkg --print-architecture)" = "debian:13:$1"
+          apt-get -qq update
+          apt-get -qq -y --no-install-recommends install ca-certificates
+          mapfile -t expected < /receipt/expected.txt
+          version="${expected[0]}"
+          test "$version" = '0.1.0~beta12'
+          [[ "${expected[1]}" =~ ^[a-f0-9]{64}$ && "${expected[2]}" =~ ^[a-f0-9]{64}$ ]]
+          printf '%s\n' 'deb [signed-by=/receipt/keyring.gpg] https://packages.pxetools.com/apt stable main' >/tmp/pxe-tools.list
+          install -d -m 0755 /var/lib/apt/pxe-public-lists
+          opts=(-o Dir::Etc::sourceparts=- -o Dir::Etc::sourcelist=/tmp/pxe-tools.list
+                -o Dir::State::lists=/var/lib/apt/pxe-public-lists -o APT::Update::Error-Mode=any)
+          apt-get "${opts[@]}" update
+          directory=$(mktemp -d /tmp/pxe-packages.XXXXXXXX)
+          chown _apt:root "$directory"
+          cd "$directory"
+          apt-get "${opts[@]}" download "pxe-tools=$version" "pxe-tools-ansible=$version"
+          cores=(pxe-tools_*.deb)
+          modules=(pxe-tools-ansible_*.deb)
+          test "${#cores[@]}:${#modules[@]}" = 1:1
+          printf '%s  %s\n' "${expected[1]}" "${cores[0]}" "${expected[2]}" "${modules[0]}" | sha256sum --check
+          test "$(dpkg-deb -f "${cores[0]}" Architecture)" = "$1"
+          test "$(dpkg-deb -f "${modules[0]}" Architecture)" = all
+          printf 'PXE_PUBLIC_APT_PASS=%s\n' "$1"
+          DEBIAN
+          jq -er '"PXE_RELEASE_SOURCE=" + .source_commit' "$receipt/manifest.json" >> "$GITHUB_ENV"
+      - name: Pull and start the public image without logging in
+        run: |
+          set -euo pipefail
+          image=ghcr.io/williamboglietti/pxe-tools-appliance:v0.1.0-beta12
+          docker pull --platform "linux/$ARCH" "$image"
+          test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$image")" = "linux/$ARCH"
+          test "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$image")" = "$PXE_RELEASE_SOURCE"
+          docker run --name pxe-public-receipt --network none -d "$image"
+          trap 'docker rm -f pxe-public-receipt >/dev/null' EXIT
+          for retry in {1..60}; do
+            if docker exec pxe-public-receipt curl -fsS --max-time 2 http://127.0.0.1:8080/healthz >/dev/null 2>&1; then break; fi
+            sleep 1
+          done
+          docker exec pxe-public-receipt curl -fsS http://127.0.0.1:8080/healthz
+          printf 'PXE_PUBLIC_DOCKER_PASS=%s\n' "$ARCH"
