@@ -1,0 +1,80 @@
+name: Beta 11 signed APT upgrade on Debian 13
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_run:
+        description: Canonical APT package build run in pxe-tools
+        required: true
+        type: string
+      source:
+        description: Exact source commit of the canonical build
+        required: true
+        type: string
+      probe_only:
+        description: Check access to the canonical artifacts only
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  acquire:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 6
+    steps:
+      - name: Verify the upstream workflow run and download the exact artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUILD_RUN: ${{ inputs.candidate_run }}
+          SOURCE_COMMIT: ${{ inputs.source }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$BUILD_RUN" =~ ^[1-9][0-9]+$ && "$SOURCE_COMMIT" =~ ^[a-f0-9]{40}$ ]]
+          upstream=williamboglietti/pxe-tools
+          gh api "repos/$upstream/actions/runs/$BUILD_RUN" | jq -e --arg source "$SOURCE_COMMIT" \
+            '.head_sha == $source and .head_branch == "main" and .event == "workflow_dispatch"
+             and .path == ".github/workflows/apt-package-candidate.yml" and .conclusion == "success"'
+          gh run download "$BUILD_RUN" --repo "$upstream" --name pxe-debian-package --dir candidate
+          test "$(cat candidate/source-commit.txt)" = "$SOURCE_COMMIT"
+          printf 'Canonical candidate artifact verified for %s from run %s\n' "$SOURCE_COMMIT" "$BUILD_RUN"
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        if: ${{ !inputs.probe_only }}
+        with:
+          name: canonical-candidate
+          path: candidate/
+          if-no-files-found: error
+          retention-days: 7
+
+  upgrade:
+    needs: acquire
+    if: ${{ !inputs.probe_only }}
+    strategy:
+      fail-fast: false
+      matrix:
+        scenario: [base, ansible-proxy]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
+        with:
+          name: canonical-candidate
+          path: candidate/
+      - name: Upgrade the installed beta 10 instance using signed APT metadata
+        env:
+          SCENARIO: ${{ matrix.scenario }}
+          BUILD_RUN: ${{ inputs.candidate_run }}
+          SOURCE_COMMIT: ${{ inputs.source }}
+        shell: bash
+        run: bash apt-upgrade/runner.sh
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        with:
+          name: beta11-upgrade-${{ matrix.scenario }}
+          path: upgrade-proof/
+          if-no-files-found: error
+          retention-days: 30
