@@ -1,0 +1,17 @@
+name: Check a single runner for Windows PXE
+on: workflow_dispatch
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: windows-2025
+    timeout-minutes: 10
+    steps:
+      - name: Probe WSL 2 and the Linux guest isolation facilities
+        shell: pwsh
+        run: |
+          wsl.exe --status
+          wsl.exe --install --distribution Ubuntu-24.04 --no-launch --web-download
+          if ($LASTEXITCODE -ne 0) { throw 'A disposable WSL distribution could not be started.' }
+          wsl.exe --distribution Ubuntu-24.04 --user root --exec /bin/bash -lc 'set -e; uname -m; test -c /dev/net/tun; test -c /dev/kvm; unshare --net ip link show'
+          if ($LASTEXITCODE -ne 0) { throw 'The available Windows runner did not provide all Linux VM facilities.' }
