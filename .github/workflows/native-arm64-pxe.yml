@@ -43,6 +43,10 @@ jobs:
           RUN apt-get update && apt-get install -y --no-install-recommends /var/tmp/native.deb systemd-sysv qemu-system-x86 qemu-utils && rm -f /var/tmp/native.deb && rm -rf /var/lib/apt/lists/*
           DOCKERFILE
           echo "PXE_NATIVE_PXE_IMAGE=$image" >> "$GITHUB_ENV"
+      - name: Install the fixture console reader
+        run: |
+          sudo apt-get -qq update
+          sudo apt-get -qq install -y --no-install-recommends tesseract-ocr
       - name: Exercise discovery, installer and first boot on an isolated bridge
         run: |
           set -euo pipefail
