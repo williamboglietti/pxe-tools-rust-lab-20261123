@@ -1,0 +1,86 @@
+name: Native Debian 13 PXE
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  first-boot:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    env:
+      PXE_SOURCE_COMMIT: fb83ecceed432d10cdcc72e6e9df6a246722d182
+      PXE_CLOUD_SHA512: 37cb32b320820417eb04b335afcf489bfb4cecce4a957190d09cb2bffbe02b56a1cadd62d78c6ead92aa7839d5ea65e4260f994bbb4b54490df59fdf11ee1d97
+    steps:
+      - name: Check out the exact PXE Tools draft
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: williamboglietti/pxe-tools
+          ref: fb83ecceed432d10cdcc72e6e9df6a246722d182
+          persist-credentials: false
+          path: pxe-tools
+      - name: Build the native test package and Rust binary
+        working-directory: pxe-tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$PXE_SOURCE_COMMIT"
+          rustup toolchain install 1.96.0 --profile minimal
+          cargo +1.96.0 build --locked --release --manifest-path rust/Cargo.toml
+          mkdir -p "$RUNNER_TEMP/native-inputs"
+          python3 packaging/native/build-local-package.py "$RUNNER_TEMP/native-inputs/pxe-tools-local.deb" --version 0.0.1~local1
+          file rust/target/release/pxe-tools-rust
+          sha256sum rust/target/release/pxe-tools-rust "$RUNNER_TEMP/native-inputs/pxe-tools-local.deb"
+      - name: Fetch the Debian fixture inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          inputs="$RUNNER_TEMP/native-inputs"
+          release=https://deb.debian.org/debian/dists/trixie
+          netboot="$release/main/installer-amd64/current/images"
+          cloud=https://cloud.debian.org/images/cloud/trixie/20261116-2664/debian-13-genericcloud-amd64-20261116-2664.qcow2
+          curl --fail --silent --show-error --retry 3 --output "$inputs/debian13.qcow2" "$cloud"
+          printf '%s  %s\n' "$PXE_CLOUD_SHA512" "$inputs/debian13.qcow2" | sha512sum --check
+          curl --fail --silent --show-error --retry 3 --output "$inputs/InRelease" "$release/InRelease"
+          curl --fail --silent --show-error --retry 3 --output "$inputs/Packages.xz" "$release/main/binary-amd64/Packages.xz"
+          curl --fail --silent --show-error --retry 3 --output "$inputs/SHA256SUMS" "$netboot/SHA256SUMS"
+          for asset in linux initrd.gz; do
+            curl --fail --silent --show-error --retry 3 --output "$inputs/$asset" "$netboot/netboot/debian-installer/amd64/$asset"
+          done
+      - name: Prepare Debian 13 userspace for the QEMU harness
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker build --pull --tag local/pxe-native-lab:trixie - <<'DOCKERFILE'
+          FROM debian:13-slim
+          RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates gpgv python3 qemu-system-x86 qemu-utils xorriso && apt-get clean
+          DOCKERFILE
+      - name: Verify native dnsmasq, Debian login and accepted first-boot checkpoint
+        shell: bash
+        run: |
+          set -euo pipefail
+          results=$(mktemp -d "$RUNNER_TEMP/native-results.XXXXXX")
+          status=0
+          docker run --rm --cap-drop ALL --security-opt no-new-privileges \
+            --user "$(id -u):$(id -g)" --env PXE_NATIVE_RUST_QEMU_TEST=1 --env PYTHONUNBUFFERED=1 \
+            --mount "type=bind,src=$GITHUB_WORKSPACE/pxe-tools,dst=/source,readonly" \
+            --mount "type=bind,src=$RUNNER_TEMP/native-inputs,dst=/inputs,readonly" \
+            --mount "type=bind,src=$results,dst=/tmp" --workdir /source \
+            local/pxe-native-lab:trixie python3 tests/integration/test_native_rust_debian_pxe.py \
+            --cloud-image /inputs/debian13.qcow2 --cloud-sha512 "$PXE_CLOUD_SHA512" \
+            --inputs /inputs --package /inputs/pxe-tools-local.deb \
+            --rust /source/rust/target/release/pxe-tools-rust --keep-fixture || status=$?
+          for fixture in "$results"/pxe-native-qemu-*; do
+            if [ -f "$fixture/native-status.log" ]; then
+              grep -a '^PXE_NATIVE_' "$fixture/native-status.log" || true
+            fi
+            if [ -f "$fixture/first-boot.serial" ]; then
+              grep -aE 'Debian GNU/Linux 13 pxe-fixture ttyS0|pxe-fixture login:' "$fixture/first-boot.serial" || true
+            fi
+            if [ "$status" -ne 0 ] && [ -f "$fixture/native-status.log" ]; then
+              tail -n 30 "$fixture/native-status.log" | tr -cd '\11\12\15\40-\176'
+            fi
+          done
+          exit "$status"
