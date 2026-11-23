@@ -1,0 +1,83 @@
+name: Beta 12 signed upgrade in Debian 13 VMs
+
+on:
+  workflow_dispatch:
+    inputs:
+      source:
+        description: Exact candidate commit
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  upgrade:
+    name: Upgrade beta 11 to beta 12 (${{ matrix.scenario }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        scenario: [base, ansible-proxy]
+    env:
+      SOURCE_COMMIT: ${{ inputs.source }}
+      BUILD_RUN: ${{ github.run_id }}
+      SCENARIO: ${{ matrix.scenario }}
+    steps:
+      - name: Validate source
+        run: '[[ "$SOURCE_COMMIT" =~ ^[a-f0-9]{40}$ ]]'
+      - name: Check out the disposable upgrade harness
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+      - name: Check out PXE Tools
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          repository: williamboglietti/pxe-tools
+          ref: ${{ inputs.source }}
+          path: pxe-tools
+          persist-credentials: false
+      - name: Build candidate packages
+        working-directory: pxe-tools
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
+          install -d "$GITHUB_WORKSPACE/candidate"
+          out="$GITHUB_WORKSPACE/candidate"
+          core="$out/pxe-tools_0.1.0-beta12_amd64.deb"
+          module="$out/pxe-tools-ansible_0.1.0-beta12_all.deb"
+          python3 packaging/native/build-apt-package-candidate.py "$core" --version 0.1.0~beta12 --architecture amd64 --maintainer 'PXE Tools <security@pxetools.com>'
+          python3 packaging/native/build-local-ansible-package.py "$module" --version 0.1.0~beta12 --release
+          sha256sum "$core" | cut -d' ' -f1 > "$out/package.sha256"
+          sha256sum "$module" | cut -d' ' -f1 > "$out/ansible-package.sha256"
+          printf '%s\n' "$SOURCE_COMMIT" > "$out/source-commit.txt"
+      - name: Move the disposable fixture to the beta 11 and beta 12 pair
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          suite = Path('apt-upgrade')
+          for name in ('runner.sh', 'guest.sh', 'fixture.py'):
+              path = suite / name
+              text = re.sub('beta1[01]', lambda match: {'beta10': 'beta11', 'beta11': 'beta12'}[match[0]], path.read_text())
+              if name == 'runner.sh':
+                  for old, new in (
+                      ('0aca46396b5a98d8798790e1fa6fe2126f93e5edfc9d168dcb6dfdbec5187e14', 'e670b899dc5a4aeb9ae91131b549b82bb8a9c050a10ea2ded97b7bbe59671274'),
+                      ('dfc09bb232d3496a60631abb6bf72b9acff57a3411d88b56d80251d5b06ba887', 'd4a0d94094b812e9f21d24363eb7594fbc5f608bffc999e5dc9bc10db49fdf87'),
+                  ):
+                      assert text.count(old) == 1
+                      text = text.replace(old, new)
+              path.write_text(text)
+          PY
+          bash -n apt-upgrade/runner.sh
+          bash -n apt-upgrade/guest.sh
+      - name: Upgrade under systemd with working cgroup freezer
+        run: bash apt-upgrade/runner.sh
+      - name: Archive upgrade receipt
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        with:
+          name: upgrade-beta12-${{ matrix.scenario }}
+          path: upgrade-proof/
+          retention-days: 7
