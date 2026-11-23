@@ -102,27 +102,28 @@ jobs:
             $media = (wsl.exe -d Ubuntu-24.04 --exec wslpath -a -u "$output").Trim()
             if ($LASTEXITCODE -ne 0 -or $media -notmatch '^/mnt/[a-z]/') { throw 'The isolated media path could not be shared with WSL.' }
             $script = Join-Path $temp 'run-pxe.sh'
-            @'
-            #!/usr/bin/env bash
-            set -euo pipefail
-            pxe_source="$1"
-            pxe_media="$2"
-            pxe_checkout=$(mktemp -d /var/tmp/pxe-windows-source.XXXXXXXX)
-            git -C "$pxe_checkout" init -q
-            git -C "$pxe_checkout" fetch --depth 1 https://github.com/williamboglietti/pxe-tools "$pxe_source"
-            git -C "$pxe_checkout" checkout --detach FETCH_HEAD
-            cd "$pxe_checkout"
-            test "$(git rev-parse HEAD)" = "$pxe_source"
-            export PXE_RUST_GUIDED_DOCKER_IMAGE="pxe-guided-${pxe_source:0:10}:local"
-            export PXE_NATIVE_PXE_IMAGE="pxe-native-e2e-${pxe_source:0:10}:local"
-            docker build --target rust-guided -f docker/pxe-tools/Dockerfile --tag "$PXE_RUST_GUIDED_DOCKER_IMAGE" .
-            docker build --tag "$PXE_NATIVE_PXE_IMAGE" - <<'DOCKERFILE'
-            FROM debian:13-slim
-            RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl dnsmasq-base python3 qemu-system-x86 qemu-utils && rm -rf /var/lib/apt/lists/*
-            DOCKERFILE
-            export PXE_NATIVE_PXE_TEST=1 PXE_NATIVE_PXE_BACKEND=rust-docker PXE_NATIVE_PXE_ARCH=amd64 PYTHONUNBUFFERED=1
-            python3 tests/integration/test_windows_pxe_isolated.py "$pxe_media"
-            '@ -replace "`r`n","`n" | Set-Content -LiteralPath $script -Encoding utf8NoBOM -NoNewline
+            $bootstrap = @'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          pxe_source="$1"
+          pxe_media="$2"
+          pxe_checkout=$(mktemp -d /var/tmp/pxe-windows-source.XXXXXXXX)
+          git -C "$pxe_checkout" init -q
+          git -C "$pxe_checkout" fetch --depth 1 https://github.com/williamboglietti/pxe-tools "$pxe_source"
+          git -C "$pxe_checkout" checkout --detach FETCH_HEAD
+          cd "$pxe_checkout"
+          test "$(git rev-parse HEAD)" = "$pxe_source"
+          export PXE_RUST_GUIDED_DOCKER_IMAGE="pxe-guided-${pxe_source:0:10}:local"
+          export PXE_NATIVE_PXE_IMAGE="pxe-native-e2e-${pxe_source:0:10}:local"
+          docker build --target rust-guided -f docker/pxe-tools/Dockerfile --tag "$PXE_RUST_GUIDED_DOCKER_IMAGE" .
+          docker build --tag "$PXE_NATIVE_PXE_IMAGE" - <<'DOCKERFILE'
+          FROM debian:13-slim
+          RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl dnsmasq-base python3 qemu-system-x86 qemu-utils && rm -rf /var/lib/apt/lists/*
+          DOCKERFILE
+          export PXE_NATIVE_PXE_TEST=1 PXE_NATIVE_PXE_BACKEND=rust-docker PXE_NATIVE_PXE_ARCH=amd64 PYTHONUNBUFFERED=1
+          python3 tests/integration/test_windows_pxe_isolated.py "$pxe_media"
+          '@
+            $bootstrap -replace "`r`n","`n" | Set-Content -LiteralPath $script -Encoding utf8NoBOM -NoNewline
             $linuxScript = (wsl.exe -d Ubuntu-24.04 --exec wslpath -a -u "$script").Trim()
             wsl.exe -d Ubuntu-24.04 --user root --exec /bin/bash "$linuxScript" $env:PXE_SOURCE "$media"
             if ($LASTEXITCODE -ne 0) { throw 'The isolated Windows PXE deployment did not pass.' }
