@@ -41,13 +41,13 @@ jobs:
           release=https://deb.debian.org/debian/dists/trixie
           netboot="$release/main/installer-amd64/current/images"
           cloud=https://cloud.debian.org/images/cloud/trixie/20261116-2664/debian-13-genericcloud-amd64-20261116-2664.qcow2
-          curl --fail --silent --show-error --retry 3 --output "$inputs/debian13.qcow2" "$cloud"
+          curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --max-redirs 5 --retry 3 --output "$inputs/debian13.qcow2" "$cloud"
           printf '%s  %s\n' "$PXE_CLOUD_SHA512" "$inputs/debian13.qcow2" | sha512sum --check
-          curl --fail --silent --show-error --retry 3 --output "$inputs/InRelease" "$release/InRelease"
-          curl --fail --silent --show-error --retry 3 --output "$inputs/Packages.xz" "$release/main/binary-amd64/Packages.xz"
-          curl --fail --silent --show-error --retry 3 --output "$inputs/SHA256SUMS" "$netboot/SHA256SUMS"
+          curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --max-redirs 5 --retry 3 --output "$inputs/InRelease" "$release/InRelease"
+          curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --max-redirs 5 --retry 3 --output "$inputs/Packages.xz" "$release/main/binary-amd64/Packages.xz"
+          curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --max-redirs 5 --retry 3 --output "$inputs/SHA256SUMS" "$netboot/SHA256SUMS"
           for asset in linux initrd.gz; do
-            curl --fail --silent --show-error --retry 3 --output "$inputs/$asset" "$netboot/netboot/debian-installer/amd64/$asset"
+            curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --max-redirs 5 --retry 3 --output "$inputs/$asset" "$netboot/netboot/debian-installer/amd64/$asset"
           done
       - name: Prepare Debian 13 userspace for the QEMU harness
         shell: bash
