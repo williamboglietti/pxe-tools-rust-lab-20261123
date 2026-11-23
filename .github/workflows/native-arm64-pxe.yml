@@ -1,0 +1,60 @@
+name: Native ARM64 PXE to Debian first login
+
+on:
+  workflow_dispatch:
+    inputs:
+      source:
+        description: Full PXE Tools commit with the isolated lab
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  first-boot:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 85
+    env:
+      PXE_SOURCE: ${{ inputs.source }}
+    steps:
+      - name: Validate source revision
+        run: '[[ "$PXE_SOURCE" =~ ^[a-f0-9]{40}$ ]]'
+      - name: Check out PXE Tools
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          repository: williamboglietti/pxe-tools
+          ref: ${{ inputs.source }}
+          persist-credentials: false
+      - name: Build an ARM64 Debian 13 appliance with the native package
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$PXE_SOURCE"
+          test "$(uname -m)" = aarch64
+          inputs=$(mktemp -d "$RUNNER_TEMP/arm64-appliance.XXXXXXXX")
+          image="pxe-native-e2e-${PXE_SOURCE:0:10}:local"
+          python3 packaging/native/build-local-package.py "$inputs/native.deb" --architecture arm64 --version 0.0.1~local1
+          dpkg-deb --field "$inputs/native.deb" Package Version Architecture
+          sha256sum "$inputs/native.deb"
+          docker build --platform linux/arm64 --tag "$image" -f - "$inputs" <<'DOCKERFILE'
+          FROM debian:13-slim
+          COPY native.deb /var/tmp/native.deb
+          RUN apt-get update && apt-get install -y --no-install-recommends /var/tmp/native.deb systemd-sysv qemu-system-x86 qemu-utils && rm -f /var/tmp/native.deb && rm -rf /var/lib/apt/lists/*
+          DOCKERFILE
+          echo "PXE_NATIVE_PXE_IMAGE=$image" >> "$GITHUB_ENV"
+      - name: Exercise discovery, installer and first boot on an isolated bridge
+        run: |
+          set -euo pipefail
+          if [ ! -c /dev/net/tun ]; then
+            sudo install -d /dev/net
+            sudo mknod /dev/net/tun c 10 200
+          fi
+          sudo -- env PXE_NATIVE_PXE_TEST=1 PXE_NATIVE_PXE_ARCH=arm64 PXE_NATIVE_PXE_IMAGE="$PXE_NATIVE_PXE_IMAGE" \
+            PYTHONUNBUFFERED=1 python3 tests/integration/test_native_discovery_install_chain_isolated.py 2>&1 | tee pxe-arm64.log
+      - name: Archive the isolated test log
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        with:
+          name: pxe-arm64-first-boot
+          path: pxe-arm64.log
+          retention-days: 7
