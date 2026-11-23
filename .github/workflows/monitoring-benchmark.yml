@@ -1,0 +1,99 @@
+name: Debian 13 amd64 1 GiB monitoring benchmark
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  monitor:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      PXE_SOURCE_COMMIT: fb83ecceed432d10cdcc72e6e9df6a246722d182
+      PXE_CLOUD_SHA512: 37cb32b320820417eb04b335afcf489bfb4cecce4a957190d09cb2bffbe02b56a1cadd62d78c6ead92aa7839d5ea65e4260f994bbb4b54490df59fdf11ee1d97
+    steps:
+      - name: Check out the benchmark harness
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+      - name: Check out the exact PXE Tools draft
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          repository: williamboglietti/pxe-tools
+          ref: fb83ecceed432d10cdcc72e6e9df6a246722d182
+          path: pxe-tools
+          persist-credentials: false
+      - name: Prepare Debian and build Rust in release mode
+        shell: bash
+        run: |
+          set -euo pipefail
+          lab="$RUNNER_TEMP/pxe-monitor"
+          mkdir -p "$lab/seed" benchmark-output
+          sudo apt-get -qq update
+          sudo apt-get -y -qq install --no-install-recommends qemu-system-x86 qemu-utils xorriso
+          cloud=https://cloud.debian.org/images/cloud/trixie/20261116-2664/debian-13-genericcloud-amd64-20261116-2664.qcow2
+          curl -fsSL --proto '=https' --proto-redir '=https' --max-redirs 5 --retry 3 "$cloud" -o "$lab/debian.qcow2"
+          printf '%s  %s\n' "$PXE_CLOUD_SHA512" "$lab/debian.qcow2" | sha512sum --check
+          test "$(git -C pxe-tools rev-parse HEAD)" = "$PXE_SOURCE_COMMIT"
+          test -z "$(git -C pxe-tools status --porcelain)"
+          rustup toolchain install 1.96.0 --profile minimal
+          CARGO_TARGET_DIR="$lab/target" cargo +1.96.0 build --locked --release --manifest-path pxe-tools/rust/Cargo.toml
+          install -m 0755 "$lab/target/release/pxe-tools-rust" "$lab/seed/pxe-tools-rust"
+          tar -czf "$lab/seed/source.tar.gz" pxe-tools
+          printf 'instance-id: pxe-monitor-fixture\nlocal-hostname: pxe-monitor-fixture\n' > "$lab/seed/meta-data"
+          bash -n monitoring/guest.sh
+          install -m 0755 monitoring/guest.sh "$lab/seed/user-data"
+          xorriso -as mkisofs -quiet -volid cidata -joliet -rock -o "$lab/seed.iso" "$lab/seed"
+          qemu-img create -q -f qcow2 -F qcow2 -b "$lab/debian.qcow2" "$lab/guest.qcow2" 8G
+      - name: Measure PSS, PSI, latency and throughput in the 1 GiB guest
+        shell: bash
+        run: |
+          set -euo pipefail
+          lab="$RUNNER_TEMP/pxe-monitor"
+          accel=(-accel tcg)
+          if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
+              accel=(-accel kvm -cpu host)
+          fi
+          printf 'QEMU mode %s\n' "${accel[*]}" | tee benchmark-output/context.txt
+          qemu-system-x86_64 --version | head -1 | tee -a benchmark-output/context.txt
+          status=0
+          timeout 18m qemu-system-x86_64 -machine pc "${accel[@]}" -m 1024 -smp 2 \
+              -display none -monitor none -no-reboot -boot c \
+              -serial "file:$lab/kernel.log" -serial stdio \
+              -drive "file=$lab/guest.qcow2,if=virtio,format=qcow2" \
+              -drive "file=$lab/seed.iso,format=raw,media=cdrom,readonly=on" \
+              -netdev user,id=bootstrap -device virtio-net-pci,netdev=bootstrap \
+              </dev/null | tr -d '\r' | tee "$lab/serial.log" || status=$?
+          if [ "$status" -ne 0 ] || ! grep -qx 'PXE_BENCH_EXIT=0' "$lab/serial.log"; then
+              tail -n 65 "$lab/kernel.log"
+              exit 1
+          fi
+          awk '/^PXE_CONTEXT_BEGIN$/ {p=1; next} /^PXE_CONTEXT_END$/ {p=0} p' \
+              "$lab/serial.log" >> benchmark-output/context.txt
+          awk '/^PXE_METRICS_BEGIN$/ {p=1; next} /^PXE_METRICS_END$/ {p=0} p' \
+              "$lab/serial.log" > benchmark-output/metrics.json
+          python3 - <<'PY'
+          from collections import Counter
+          import json
+          import os
+          from pathlib import Path
+
+          result = json.loads(Path('benchmark-output/metrics.json').read_text())
+          assert result['source'] == os.environ['PXE_SOURCE_COMMIT']
+          assert (result['reponses_identiques'], result['clients'], result['duree_secondes']) == (64, 4, 12)
+          measures = result['mesures']
+          assert Counter(row['variante'] for row in measures) == {
+              'php-dynamic-8': 6, 'php-ondemand-3': 6, 'rust-3': 6,
+          }
+          for row in measures:
+              assert row['pss_repos_mio'] is not None and row['pss_charge_max_mio'] is not None, row
+              assert set(row['pression_memoire_hote_usec']) == {'some', 'full'}, row
+              assert row['p95_ms'] > 0 and row['requetes_par_seconde'] > 0, row
+          PY
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        with:
+          name: pxe-monitor-debian13-1gib
+          path: benchmark-output/
+          if-no-files-found: error
+          retention-days: 30
