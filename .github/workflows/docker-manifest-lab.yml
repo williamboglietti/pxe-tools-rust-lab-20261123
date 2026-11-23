@@ -1,0 +1,38 @@
+name: Validate Docker promotion in an isolated registry
+on: workflow_dispatch
+
+permissions:
+  contents: read
+
+jobs:
+  promotion:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - name: Validate image archives and the dual-platform index
+        run: |
+          set -euo pipefail
+          work=$(mktemp -d "$RUNNER_TEMP/pxe-registry-fixture.XXXXXXXX")
+          docker run -d --name pxe-registry-fixture -p 127.0.0.1::5000 registry:3
+          endpoint=$(docker port pxe-registry-fixture 5000/tcp)
+          registry="$endpoint/fixture/pxe-tools"
+          for attempt in {1..20}; do
+            if curl -fsS "http://$endpoint/v2/" >/dev/null; then break; fi
+            sleep 1
+          done
+          curl -fsS "http://$endpoint/v2/" >/dev/null
+          for arch in amd64 arm64; do
+            image="$registry:vfixture-$arch"
+            printf 'FROM scratch\nLABEL org.opencontainers.image.revision=fixture\n' |
+              docker buildx build --platform "linux/$arch" --load -t "$image" -
+            id=$(docker image inspect --format '{{.Id}}' "$image")
+            docker image save "$image" | gzip -3 > "$work/image-$arch.tar.gz"
+            docker image rm "$image"
+            docker image load --input "$work/image-$arch.tar.gz"
+            test "$(docker image inspect --format '{{.Id}}' "$image")" = "$id"
+            test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$image")" = "linux/$arch"
+            docker image push "$image"
+          done
+          docker buildx imagetools create --tag "$registry:vfixture" "$registry:vfixture-amd64" "$registry:vfixture-arm64"
+          docker buildx imagetools inspect --raw "$registry:vfixture" |
+            jq -e '[.manifests[].platform | (.os + "/" + .architecture)] | sort == ["linux/amd64", "linux/arm64"]'
