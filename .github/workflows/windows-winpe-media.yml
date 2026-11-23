@@ -1,0 +1,82 @@
+name: Prepare Windows PXE qualification media
+on:
+  workflow_dispatch:
+    inputs:
+      source:
+        description: Exact PXE Tools commit
+        required: true
+        type: string
+permissions:
+  contents: read
+jobs:
+  prepare:
+    runs-on: windows-2025
+    timeout-minutes: 40
+    env:
+      PXE_SOURCE: ${{ inputs.source }}
+    steps:
+      - name: Validate revision
+        shell: pwsh
+        run: |
+          if ($env:PXE_SOURCE -cnotmatch '^[0-9a-f]{40}$') { throw 'Expected a full commit SHA.' }
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: williamboglietti/pxe-tools
+          ref: ${{ inputs.source }}
+          persist-credentials: false
+      - name: Verify and prepare the real media in the runner temporary directory
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ((git rev-parse HEAD) -cne $env:PXE_SOURCE) { throw 'Unexpected source revision.' }
+          $temp = Join-Path $env:RUNNER_TEMP ('pxe-winpe-' + [guid]::NewGuid().ToString())
+          $null = New-Item -ItemType Directory -Path $temp
+
+          function Fetch([string]$Url, [string]$Destination) {
+            & curl.exe --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --retry 2 --max-time 700 --output "$Destination" "$Url"
+            if ($LASTEXITCODE -ne 0) { throw 'Unable to retrieve the test media.' }
+          }
+
+          try {
+            $adk = Join-Path $temp 'adksetup.exe'
+            $pe = Join-Path $temp 'adkwinpesetup.exe'
+            Fetch 'https://download.microsoft.com/download/8e0c0f5a-abb5-4358-a51b-168eb40b1590/adk/adksetup.exe' $adk
+            Fetch 'https://download.microsoft.com/download/a4a79e7a-f085-41c4-aebf-2538fd000790/adkwinpeaddons/adkwinpesetup.exe' $pe
+            foreach ($installer in @($adk, $pe)) {
+              $signature = Get-AuthenticodeSignature -LiteralPath $installer
+              if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch '(?:^|, )O=Microsoft Corporation(?:,|$)') {
+                throw 'The ADK installer is not signed by Microsoft.'
+              }
+            }
+            $adkProcess = Start-Process -FilePath $adk -ArgumentList '/quiet','/norestart','/ceip','off','/features','OptionId.DeploymentTools' -Wait -PassThru
+            if ($adkProcess.ExitCode -ne 0) { throw "ADK installer failed with exit code $($adkProcess.ExitCode)." }
+            $peProcess = Start-Process -FilePath $pe -ArgumentList '/quiet','/norestart','/ceip','off','/features','OptionId.WindowsPreinstallationEnvironment' -Wait -PassThru
+            if ($peProcess.ExitCode -ne 0) { throw "WinPE installer failed with exit code $($peProcess.ExitCode)." }
+            Write-Output 'Microsoft ADK Deployment Tools and WinPE are installed on the runner.'
+
+            $iso = Join-Path $temp 'windows.iso'
+            $wimboot = Join-Path $temp 'wimboot'
+            $isoHash = 'BC3F24086EBADC94489066B5AD78089E2CF5C3491E90E790BB81A2B199C10E38'
+            $wimbootHash = '5f067ccdc4d084d5bf77b6c853bd0f8402dfc2b4cd1b103d358993ae97fae8e3'
+            Fetch 'https://software-static.download.prss.microsoft.com/dbazure/26300.9457.260913-1737.26h2_ge_release_svc_refresh_CLIENTENTERPRISEEVAL_OEMRET_x64FRE_en-us.iso' $iso
+            Fetch 'https://github.com/ipxe/wimboot/releases/download/v2.9.0/wimboot' $wimboot
+            if ((Get-FileHash -LiteralPath $iso -Algorithm SHA256).Hash -ne $isoHash) { throw 'Windows evaluation ISO differs from the Microsoft hash.' }
+            $registered = Mount-DiskImage -ImagePath $iso -Access ReadOnly -PassThru
+            try {
+              $volume = $registered | Get-Volume
+              $imagePath = "$($volume.DriveLetter):\sources\install.wim"
+              $results = @(Get-WindowsImage -ImagePath $imagePath | Where-Object { $_.ImageName -eq 'Windows 11 Enterprise Evaluation' })
+              if ($results.Count -ne 1) { throw 'Expected one Windows 11 Enterprise evaluation image.' }
+              $index = $results[0].ImageIndex
+            } finally {
+              Dismount-DiskImage -ImagePath $iso | Out-Null
+            }
+
+            $output = Join-Path $temp 'prepared'
+            & ./tests/support/windows-pxe/prepare-winpe.ps1 -WindowsIso $iso -WindowsIsoSha256 $isoHash -Wimboot $wimboot -WimbootSha256 $wimbootHash -OutputDirectory $output -GuestId ([guid]::NewGuid()) -DiskSerial 'PXE-WIN11-TEST' -Edition EnterpriseEval -InstallImageIndex $index
+            python tests/integration/verify_windows_pxe_deployment.py --case "$output\case.json" --iso "$iso" --winpe "$output\boot\boot.wim" --boot-root "$output\boot"
+            if ($LASTEXITCODE -ne 0) { throw 'Prepared media failed verification.' }
+            Write-Output 'Official Windows 11 Enterprise evaluation ISO and customized WinPE verified.'
+          } finally {
+            Remove-Item -LiteralPath $temp -Recurse -Force
+          }
