@@ -70,7 +70,7 @@ jobs:
             docker image inspect -f 'Guided image: {{.Os}}/{{.Architecture}} {{.Size}} bytes' "$appliance"
             docker build --platform "linux/$PXE_ARCH" --tag "$image" - <<'DOCKERFILE'
           FROM debian:13-slim
-          RUN apt-get update && apt-get install -y --no-install-recommends debian-archive-keyring ca-certificates gpgv curl dnsmasq-base python3 qemu-system-x86 qemu-utils socat && rm -rf /var/lib/apt/lists/*
+          RUN apt-get update && apt-get install -y --no-install-recommends debian-archive-keyring ca-certificates cpio gpgv curl dnsmasq-base python3 qemu-system-x86 qemu-utils socat && rm -rf /var/lib/apt/lists/*
           DOCKERFILE
           fi
           echo "PXE_NATIVE_PXE_IMAGE=$image" >> "$GITHUB_ENV"
