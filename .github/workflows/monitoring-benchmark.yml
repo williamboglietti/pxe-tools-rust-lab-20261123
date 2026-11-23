@@ -37,7 +37,7 @@ jobs:
           mode=tcg
           if [ -c /dev/kvm ]; then
               kvm_gid=$(stat -c '%g' /dev/kvm)
-              if sudo -u "$(id -un)" -g "#$kvm_gid" -- python3 - <<'PY'
+              if sudo -n -- setpriv --reuid "$(id -u)" --regid "$kvm_gid" --init-groups -- python3 - <<'PY'
           import fcntl
           import os
 
@@ -90,7 +90,7 @@ jobs:
           launcher=()
           accel=(-accel tcg)
           if [ "$PXE_ACCEL" = kvm ]; then
-              launcher=(sudo -u "$(id -un)" -g "#$PXE_KVM_GID" --)
+              launcher=(sudo -n -- setpriv --reuid "$(id -u)" --regid "$PXE_KVM_GID" --init-groups --)
               accel=(-accel kvm -cpu host)
           fi
           printf 'QEMU mode %s\n' "${accel[*]}" | tee benchmark-output/context.txt
