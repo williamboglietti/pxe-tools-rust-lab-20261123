@@ -12,11 +12,6 @@ on:
         required: false
         default: '0.1.0~lab1'
         type: string
-      upgrade:
-        description: Start the amd64 APT leg from public beta 11
-        required: false
-        default: false
-        type: boolean
 
 permissions:
   contents: read
@@ -58,19 +53,18 @@ jobs:
           PXE_ARCH: ${{ matrix.architecture }}
           PXE_MODE: ${{ matrix.mode }}
           PXE_TEST_APT_VERSION: ${{ inputs.version }}
-          PXE_UPGRADE: ${{ inputs.upgrade }}
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$PXE_SOURCE"
           printf 'source=%s\nrunner=%s\n' "$PXE_SOURCE" "$(uname -m)"
-          if [[ "$PXE_UPGRADE" == true && "$PXE_ARCH" == amd64 && "$PXE_MODE" == apt ]]; then
-            export PXE_TEST_APT_UPGRADE=1
-          fi
+          if [[ "$PXE_MODE" == docker ]]; then export PXE_DOCKER_SOURCE_OFFER="$PWD/docker-sources.json"; fi
           bash tests/integration/test_server_architecture.sh "$PXE_MODE" "$PXE_ARCH" 2>&1 | tee server-architecture.log
       - name: Archive test log
         if: always()
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
         with:
           name: server-${{ matrix.mode }}-${{ matrix.architecture }}
-          path: server-architecture.log
+          path: |
+            server-architecture.log
+            docker-sources.json
           retention-days: 3
