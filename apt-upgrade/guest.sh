@@ -46,7 +46,9 @@ versions() {
         printf 'Installed %s %s\n' "$name" "$expected"
     done
     if [ "$scenario" = base ]; then
-        ! dpkg-query -W -f='${Status}' pxe-tools-ansible 2>/dev/null
+        if dpkg-query -W -f='${Status}' pxe-tools-ansible 2>/dev/null; then
+            return 1
+        fi
     fi
 }
 
@@ -123,8 +125,8 @@ check_services() {
         test "$(curl -fsS --max-time 10 http://192.0.2.1/healthz)" = ok
         grep -qx 'dhcp-range=192.0.2.0,proxy,255.255.255.0' /var/lib/pxe-tools-native/rendered/dnsmasq.conf
     else
-        ! systemctl is-active --quiet pxe-tools-dnsmasq.service
-        ! systemctl is-active --quiet pxe-tools-pxe-http.service
+        test "$(systemctl show -p ActiveState --value pxe-tools-dnsmasq.service)" = inactive
+        test "$(systemctl show -p ActiveState --value pxe-tools-pxe-http.service)" = inactive
     fi
 }
 
@@ -136,7 +138,32 @@ record_units() {
     done
 }
 
+worker_idle() {
+    local cgroup main_pid jobs
+    cgroup=$(systemctl show -p ControlGroup --value pxe-tools-worker.service)
+    main_pid=$(systemctl show -p MainPID --value pxe-tools-worker.service)
+    jobs=$(sqlite3 -cmd '.timeout 5000' "$db" "SELECT COUNT(*) FROM init_jobs WHERE status IN ('pending', 'running')")
+    [[ "$cgroup" == /system.slice/* && "$main_pid" =~ ^[1-9][0-9]*$ ]] &&
+        [ "$jobs" = 0 ] &&
+        [ "$(cat "/sys/fs/cgroup$cgroup/cgroup.procs")" = "$main_pid" ]
+}
+
+wait_idle() {
+    local seconds
+    for seconds in $(seq 1 100); do
+        if worker_idle; then
+            sleep 1
+            if worker_idle; then return; fi
+        fi
+        sleep 1
+    done
+    printf '%s\n' 'The configured worker did not finish its initial jobs.'
+    return 1
+}
+
 wait_runtime
+apt-get "${new[@]}" -q update >/run/pxe-beta11.log 2>&1
+wait_idle
 check_services
 record_units >/run/pxe-units.before
 worker_before=$(systemctl show -p MainPID --value pxe-tools-worker.service)
@@ -144,7 +171,6 @@ test "$worker_before" -gt 0
 printf 'PXE_UPGRADE_BEGIN=%s with active worker, Ansible state %s\n' "$scenario" "$runtime"
 
 # Only the signed local repository is in the upgrade transaction.
-apt-get "${new[@]}" -q update >/run/pxe-beta11.log 2>&1
 apt-get "${new[@]}" -q -y upgrade >>/run/pxe-beta11.log 2>&1
 grep -F 'PXE Tools: upgrade configured;' /run/pxe-beta11.log
 versions '0.1.0~beta11'
