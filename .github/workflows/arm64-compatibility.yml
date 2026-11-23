@@ -7,6 +7,16 @@ on:
         description: Full PXE Tools commit to test
         required: true
         type: string
+      version:
+        description: Debian candidate version for the disposable build
+        required: false
+        default: '0.1.0~lab1'
+        type: string
+      upgrade:
+        description: Start the amd64 APT leg from public beta 11
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -47,10 +57,15 @@ jobs:
           PXE_SOURCE: ${{ inputs.source }}
           PXE_ARCH: ${{ matrix.architecture }}
           PXE_MODE: ${{ matrix.mode }}
+          PXE_TEST_APT_VERSION: ${{ inputs.version }}
+          PXE_UPGRADE: ${{ inputs.upgrade }}
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$PXE_SOURCE"
           printf 'source=%s\nrunner=%s\n' "$PXE_SOURCE" "$(uname -m)"
+          if [[ "$PXE_UPGRADE" == true && "$PXE_ARCH" == amd64 && "$PXE_MODE" == apt ]]; then
+            export PXE_TEST_APT_UPGRADE=1
+          fi
           bash tests/integration/test_server_architecture.sh "$PXE_MODE" "$PXE_ARCH" 2>&1 | tee server-architecture.log
       - name: Archive test log
         if: always()
