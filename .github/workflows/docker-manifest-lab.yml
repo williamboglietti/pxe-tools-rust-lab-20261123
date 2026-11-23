@@ -21,10 +21,12 @@ jobs:
             sleep 1
           done
           curl -fsS "http://$endpoint/v2/" >/dev/null
+          mkdir "$work/context"
+          printf 'fixture\n' > "$work/context/fixture"
+          printf 'FROM scratch\nCOPY fixture /fixture\nLABEL org.opencontainers.image.revision=fixture\n' > "$work/context/Dockerfile"
           for arch in amd64 arm64; do
             image="$registry:vfixture-$arch"
-            printf 'FROM scratch\nLABEL org.opencontainers.image.revision=fixture\n' |
-              docker buildx build --platform "linux/$arch" --load -t "$image" -
+            docker buildx build --platform "linux/$arch" --load -t "$image" "$work/context"
             id=$(docker image inspect --format '{{.Id}}' "$image")
             docker image save "$image" | gzip -3 > "$work/image-$arch.tar.gz"
             docker image rm "$image"
