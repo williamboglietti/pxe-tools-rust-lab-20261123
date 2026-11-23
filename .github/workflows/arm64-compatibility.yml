@@ -1,0 +1,61 @@
+name: PXE Tools server architectures on Debian 13
+
+on:
+  workflow_dispatch:
+    inputs:
+      source:
+        description: Full PXE Tools commit to test
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+        mode: [apt, docker]
+        include:
+          - runner: ubuntu-24.04
+            architecture: amd64
+          - runner: ubuntu-24.04-arm
+            architecture: arm64
+    name: ${{ matrix.mode }} on ${{ matrix.architecture }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    steps:
+      - name: Validate source commit
+        env:
+          PXE_SOURCE: ${{ inputs.source }}
+        run: '[[ "$PXE_SOURCE" =~ ^[a-f0-9]{40}$ ]]'
+      - name: Check out PXE Tools
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          repository: williamboglietti/pxe-tools
+          ref: ${{ inputs.source }}
+          persist-credentials: false
+      - name: Install signed repository tools
+        if: matrix.mode == 'apt'
+        run: |
+          sudo apt-get -qq update
+          sudo apt-get -qq install -y --no-install-recommends apt-utils gnupg
+      - name: Build and exercise Debian 13
+        env:
+          PXE_SOURCE: ${{ inputs.source }}
+          PXE_ARCH: ${{ matrix.architecture }}
+          PXE_MODE: ${{ matrix.mode }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$PXE_SOURCE"
+          printf 'source=%s\nrunner=%s\n' "$PXE_SOURCE" "$(uname -m)"
+          bash tests/integration/test_server_architecture.sh "$PXE_MODE" "$PXE_ARCH" 2>&1 | tee server-architecture.log
+      - name: Archive test log
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        with:
+          name: server-${{ matrix.mode }}-${{ matrix.architecture }}
+          path: server-architecture.log
+          retention-days: 3
