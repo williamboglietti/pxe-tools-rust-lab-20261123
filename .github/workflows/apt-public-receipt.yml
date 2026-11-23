@@ -1,0 +1,61 @@
+name: Verify the published APT packages with Debian 13
+on:
+  workflow_dispatch:
+    inputs:
+      manifest_commit:
+        description: Exact commit containing the approved release manifest
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  receipt:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Verify the production index and download both packages through APT
+        env:
+          MANIFEST_COMMIT: ${{ inputs.manifest_commit }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$MANIFEST_COMMIT" =~ ^[a-f0-9]{40}$ ]]
+          receipt=$(mktemp -d "$RUNNER_TEMP/apt-receipt.XXXXXXXX")
+          chmod 0755 "$receipt"
+          source="https://raw.githubusercontent.com/williamboglietti/pxe-tools/$MANIFEST_COMMIT/packaging/ci"
+          curl --proto '=https' -fsS --retry 3 "$source/release-manifest.json" -o "$receipt/manifest.json"
+          curl --proto '=https' -fsS --retry 3 "$source/pxe-tools-next-public.gpg" -o "$receipt/keyring.gpg"
+          curl --proto '=https' -fsS --retry 3 https://packages.pxetools.com/pxe-tools-archive-keyring.gpg \
+            -o "$receipt/served-keyring.gpg"
+          cmp "$receipt/keyring.gpg" "$receipt/served-keyring.gpg"
+          jq -er '.version, .package_sha256, .ansible_package_sha256' "$receipt/manifest.json" > "$receipt/expected.txt"
+          docker run --rm -i --platform linux/amd64 --mount "type=bind,src=$receipt,dst=/receipt,readonly" \
+            debian:13-slim bash -s <<'DEBIAN'
+          set -euo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          . /etc/os-release
+          test "$ID:$VERSION_ID:$(dpkg --print-architecture)" = debian:13:amd64
+          apt-get -qq update
+          apt-get -qq -y --no-install-recommends install ca-certificates
+          mapfile -t expected < /receipt/expected.txt
+          version="${expected[0]}"
+          test "$version" = '0.1.0~beta11'
+          [[ "${expected[1]}" =~ ^[a-f0-9]{64}$ && "${expected[2]}" =~ ^[a-f0-9]{64}$ ]]
+          printf '%s\n' 'deb [signed-by=/receipt/keyring.gpg] https://packages.pxetools.com/apt stable main' >/tmp/pxe-tools.list
+          install -d -m 0755 /var/lib/apt/pxe-public-lists
+          opts=(-o Dir::Etc::sourceparts=- -o Dir::Etc::sourcelist=/tmp/pxe-tools.list
+                -o Dir::State::lists=/var/lib/apt/pxe-public-lists -o APT::Update::Error-Mode=any)
+          apt-get "${opts[@]}" update
+          apt-cache "${opts[@]}" policy pxe-tools pxe-tools-ansible
+          directory=$(mktemp -d /tmp/pxe-packages.XXXXXXXX)
+          chown _apt:root "$directory"
+          cd "$directory"
+          apt-get "${opts[@]}" download "pxe-tools=$version" "pxe-tools-ansible=$version"
+          cores=(pxe-tools_*.deb)
+          modules=(pxe-tools-ansible_*.deb)
+          test "${#cores[@]}:${#modules[@]}" = 1:1
+          printf '%s  %s\n' "${expected[1]}" "${cores[0]}" "${expected[2]}" "${modules[0]}" | sha256sum --check
+          printf '%s\n' 'APT public signé et deux paquets canoniques bêta 11 vérifiés sous Debian 13 amd64.'
+          DEBIAN
