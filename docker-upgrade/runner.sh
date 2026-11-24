@@ -65,10 +65,11 @@ chown www-data:www-data "$db" /etc/pxe-tools/db.conf
 chmod 0640 "$db" /etc/pxe-tools/db.conf
 BASH
 
-await_health() {
-    local container=$1
+await_https() {
+    local container=$1 credentials=$2 port=$3
     for ((attempt = 1; attempt <= 40; attempt++)); do
-        if docker exec "$container" /opt/pxe-tools/init/healthcheck.sh >/dev/null 2>&1; then return 0; fi
+        if docker exec "$container" curl -fsS --max-time 2 --cacert "$credentials/cert.pem" \
+            "https://127.0.0.1:$port/healthz" >/dev/null 2>&1; then return 0; fi
         if [[ $(docker inspect -f '{{.State.Running}}' "$container") != true ]]; then break; fi
         sleep 3
     done
@@ -81,16 +82,16 @@ digest() {
 }
 
 docker run -d --name "$legacy" --network none "${mounts[@]}" "$published" >/dev/null
-await_health "$legacy"
 old_tls=/var/lib/pxe-tools/tls
+await_https "$legacy" "$old_tls" 8443
 legacy_cert=$(digest "$legacy" "$old_tls/cert.pem")
 legacy_key=$(digest "$legacy" "$old_tls/key.pem")
 master_key=$(digest "$legacy" /etc/pxe-tools/master.key)
 docker stop "$legacy" >/dev/null
 
 docker run -d --name "$candidate" --network none "${mounts[@]}" "${tls_mount[@]}" pxe-guided-upgrade:local >/dev/null
-await_health "$candidate"
 new_tls=/var/lib/pxe-tools-tls
+await_https "$candidate" "$new_tls" 443
 test "$(digest "$candidate" "$new_tls/cert.pem")" = "$legacy_cert"
 test "$(digest "$candidate" "$new_tls/key.pem")" = "$legacy_key"
 test "$(digest "$candidate" /etc/pxe-tools/master.key)" = "$master_key"
@@ -124,7 +125,7 @@ else:
     raise RuntimeError('Rust worker process missing after the volume migration')
 PY
 docker restart "$candidate" >/dev/null
-await_health "$candidate"
+await_https "$candidate" "$new_tls" 443
 test "$(digest "$candidate" "$new_tls/cert.pem")" = "$legacy_cert"
 test "$(digest "$candidate" "$new_tls/key.pem")" = "$legacy_key"
 printf 'PXE_DOCKER_UPGRADE_PASS=%s\n' "$PXE_ARCH"
