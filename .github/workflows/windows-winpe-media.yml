@@ -88,8 +88,15 @@ jobs:
           $null = New-Item -ItemType Directory -Path $temp
           Add-Content -LiteralPath $env:GITHUB_ENV -Value ('PXE_MEDIA_TEMP=' + $temp)
 
-          function Fetch([string]$Url, [string]$Destination) {
-            & curl.exe --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --retry 2 --max-time 700 --output "$Destination" "$Url"
+          Get-ChildItem -LiteralPath './tests/support/windows-pxe' -Filter '*.ps1' | ForEach-Object {
+            $tokens = $null
+            $parseErrors = $null
+            $null = [System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$tokens, [ref]$parseErrors)
+            if ($parseErrors.Count -gt 0) { throw ($parseErrors -join [Environment]::NewLine) }
+          }
+
+          function Fetch([string]$Url, [string]$Destination, [int]$Timeout = 700) {
+            & curl.exe --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --retry 2 --max-time $Timeout --output "$Destination" "$Url"
             if ($LASTEXITCODE -ne 0) { throw 'Unable to retrieve the test media.' }
           }
 
@@ -123,7 +130,7 @@ jobs:
           $wimboot = Join-Path $temp 'wimboot'
           $isoHash = 'BC3F24086EBADC94489066B5AD78089E2CF5C3491E90E790BB81A2B199C10E38'
           $wimbootHash = '5f067ccdc4d084d5bf77b6c853bd0f8402dfc2b4cd1b103d358993ae97fae8e3'
-          Fetch 'https://software-static.download.prss.microsoft.com/dbazure/26300.9457.260913-1737.26h2_ge_release_svc_refresh_CLIENTENTERPRISEEVAL_OEMRET_x64FRE_en-us.iso' $iso
+          Fetch 'https://software-static.download.prss.microsoft.com/dbazure/26300.9457.260913-1737.26h2_ge_release_svc_refresh_CLIENTENTERPRISEEVAL_OEMRET_x64FRE_en-us.iso' $iso 1500
           Fetch 'https://github.com/ipxe/wimboot/releases/download/v2.9.0/wimboot' $wimboot
           if ((Get-FileHash -LiteralPath $iso -Algorithm SHA256).Hash -ne $isoHash) { throw 'Windows evaluation ISO differs from the Microsoft hash.' }
           $registered = Mount-DiskImage -ImagePath $iso -Access ReadOnly -PassThru
