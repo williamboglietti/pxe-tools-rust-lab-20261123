@@ -11,6 +11,14 @@ on:
         type: choice
         options: [both, amd64, arm64]
         default: both
+      variant:
+        description: Distribution to exercise
+        type: choice
+        default: both
+        options:
+          - both
+          - apt
+          - docker
 
 permissions:
   contents: read
@@ -33,16 +41,16 @@ jobs:
       ARCH_FILTER: ${{ inputs.architecture }}
     steps:
       - name: Validate the exact revision
-        if: inputs.architecture == 'both' || inputs.architecture == matrix.arch
+        if: (inputs.architecture == 'both' || inputs.architecture == matrix.arch) && (inputs.variant == 'both' || inputs.variant == matrix.variant)
         run: '[[ "$PXE_SOURCE" =~ ^[a-f0-9]{40}$ ]]'
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-        if: inputs.architecture == 'both' || inputs.architecture == matrix.arch
+        if: (inputs.architecture == 'both' || inputs.architecture == matrix.arch) && (inputs.variant == 'both' || inputs.variant == matrix.variant)
         with:
           repository: williamboglietti/pxe-tools
           ref: ${{ inputs.source }}
           persist-credentials: false
       - name: Build the requested guided distribution and fixture tools
-        if: inputs.architecture == 'both' || inputs.architecture == matrix.arch
+        if: (inputs.architecture == 'both' || inputs.architecture == matrix.arch) && (inputs.variant == 'both' || inputs.variant == matrix.variant)
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$PXE_SOURCE"
@@ -76,7 +84,7 @@ jobs:
           echo "PXE_NATIVE_PXE_IMAGE=$image" >> "$GITHUB_ENV"
           echo "PXE_RUST_GUIDED_DOCKER_IMAGE=$appliance" >> "$GITHUB_ENV"
       - name: Install Debian from PXE and verify first boot with PHP-FPM stopped
-        if: inputs.architecture == 'both' || inputs.architecture == matrix.arch
+        if: (inputs.architecture == 'both' || inputs.architecture == matrix.arch) && (inputs.variant == 'both' || inputs.variant == matrix.variant)
         run: |
           set -euo pipefail
           sudo apt-get -qq update
