@@ -45,6 +45,16 @@ jobs:
           }
 
           try {
+            $ipxeArchive = Join-Path $temp 'ipxe.tar.gz'
+            Fetch 'https://github.com/ipxe/ipxe/releases/download/v2.0.0/ipxeboot.tar.gz' $ipxeArchive
+            if ((Get-FileHash -LiteralPath $ipxeArchive -Algorithm SHA256).Hash -ne '01a526d4cc791fc30362259c609d6c506cc64a7bdff51b9a5eb788354e17eee1') { throw 'Signed iPXE archive differs from the approved hash.' }
+            $ipxe = (New-Item -ItemType Directory -Path (Join-Path $temp 'ipxe')).FullName
+            tar.exe -xzf $ipxeArchive -C $ipxe --strip-components 2 ipxeboot/x86_64-sb/shimx64.efi ipxeboot/x86_64-sb/ipxe.efi
+            if ($LASTEXITCODE -ne 0) { throw 'Could not extract the two signed iPXE files.' }
+            # The release name ipxe-shim.efi is a symlink to the signed shim.
+            Move-Item -LiteralPath (Join-Path $ipxe 'shimx64.efi') -Destination (Join-Path $ipxe 'ipxe-shim.efi')
+            if (-not (Test-Path -LiteralPath (Join-Path $ipxe 'ipxe.efi') -PathType Leaf)) { throw 'Signed iPXE EFI file is missing.' }
+
             $adk = Join-Path $temp 'adksetup.exe'
             $pe = Join-Path $temp 'adkwinpesetup.exe'
             Fetch 'https://download.microsoft.com/download/8e0c0f5a-abb5-4358-a51b-168eb40b1590/adk/adksetup.exe' $adk
@@ -85,12 +95,8 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw 'Prepared media failed verification.' }
             Write-Output 'Official Windows 11 Enterprise evaluation ISO and customized WinPE verified.'
             Move-Item -LiteralPath $iso -Destination (Join-Path $output 'windows.iso')
-            $ipxeArchive = Join-Path $temp 'ipxe.tar.gz'
-            Fetch 'https://github.com/ipxe/ipxe/releases/download/v2.0.0/ipxeboot.tar.gz' $ipxeArchive
-            if ((Get-FileHash -LiteralPath $ipxeArchive -Algorithm SHA256).Hash -ne '01a526d4cc791fc30362259c609d6c506cc64a7bdff51b9a5eb788354e17eee1') { throw 'Signed iPXE archive differs from the approved hash.' }
-            $ipxe = (New-Item -ItemType Directory -Path (Join-Path $output 'ipxe')).FullName
-            tar.exe -xzf $ipxeArchive -C $ipxe --strip-components 2 ipxeboot/x86_64-sb/ipxe-shim.efi ipxeboot/x86_64-sb/ipxe.efi
-            if ($LASTEXITCODE -ne 0) { throw 'Could not extract the two signed iPXE files.' }
+            Move-Item -LiteralPath $ipxe -Destination (Join-Path $output 'ipxe')
+            $ipxe = Join-Path $output 'ipxe'
             $manifest = Join-Path $output 'case.json'
             $case = Get-Content -LiteralPath $manifest -Raw | ConvertFrom-Json -AsHashtable
             $case.ipxe_sha256 = @{}
