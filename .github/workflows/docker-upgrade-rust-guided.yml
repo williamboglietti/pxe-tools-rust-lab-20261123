@@ -1,0 +1,46 @@
+name: Upgrade beta 12 Docker volumes to Rust
+on:
+  workflow_dispatch:
+    inputs:
+      source:
+        description: Exact PXE Tools candidate commit
+        required: true
+        type: string
+
+permissions:
+  contents: read
+jobs:
+  upgrade:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {runner: ubuntu-24.04, arch: amd64, offer: fee616cb915b82825f4c3d9592dd97a61ecb97d44f481597cd6d522173bc6eff}
+          - {runner: ubuntu-24.04-arm, arch: arm64, offer: 1cad94b0bd1dd8c1857de41f0b812dc3b847c625034ab35a8ba87e3f46369f70}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    env:
+      SOURCE_COMMIT: ${{ inputs.source }}
+      PXE_ARCH: ${{ matrix.arch }}
+      PXE_OFFER_SHA: ${{ matrix.offer }}
+    steps:
+      - name: Validate source
+        run: '[[ "$SOURCE_COMMIT" =~ ^[a-f0-9]{40}$ ]]'
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: williamboglietti/pxe-tools
+          ref: ${{ inputs.source }}
+          path: pxe-tools
+          persist-credentials: false
+      - name: Build the exact guided candidate
+        working-directory: pxe-tools
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
+          docker build --platform "linux/$PXE_ARCH" --target rust-guided \
+            -f docker/pxe-tools/Dockerfile -t pxe-guided-upgrade:local .
+      - name: Start the published image and migrate its disposable volumes
+        run: bash docker-upgrade/runner.sh
