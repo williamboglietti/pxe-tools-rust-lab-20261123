@@ -15,3 +15,21 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'A disposable WSL distribution could not be started.' }
           wsl.exe --distribution Ubuntu-24.04 --user root --exec /bin/bash -lc 'set -e; uname -m; test -c /dev/net/tun; test -c /dev/kvm; unshare --net ip link show'
           if ($LASTEXITCODE -ne 0) { throw 'The available Windows runner did not provide all Linux VM facilities.' }
+      - name: Instantiate a disposable KVM guest without boot media
+        shell: pwsh
+        run: |
+          @'
+          import fcntl
+          import os
+
+          # Linux x86-64 UAPI kvm.h, KVM_GET_API_VERSION and KVM_CREATE_VM.
+          device = os.open('/dev/kvm', os.O_RDWR)
+          try:
+              assert fcntl.ioctl(device, 0xAE00) == 12
+              vm = fcntl.ioctl(device, 0xAE01, 0)
+              os.close(vm)
+          finally:
+              os.close(device)
+          print('KVM_CREATE_VM succeeded on the Windows runner under WSL 2.')
+          '@ | wsl.exe --distribution Ubuntu-24.04 --user root --exec python3 -
+          if ($LASTEXITCODE -ne 0) { throw 'The Windows runner cannot instantiate a nested KVM guest.' }
