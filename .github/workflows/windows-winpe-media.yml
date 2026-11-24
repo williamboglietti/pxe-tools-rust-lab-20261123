@@ -6,14 +6,23 @@ on:
         description: Exact PXE Tools commit
         required: true
         type: string
+      accelerator:
+        description: QEMU accelerator for the isolated amd64 guest
+        required: true
+        default: tcg
+        type: choice
+        options:
+          - tcg
+          - kvm
 permissions:
   contents: read
 jobs:
   prepare:
     runs-on: windows-2025
-    timeout-minutes: 65
+    timeout-minutes: 95
     env:
       PXE_SOURCE: ${{ inputs.source }}
+      PXE_ACCELERATOR: ${{ inputs.accelerator }}
     steps:
       - name: Validate revision
         shell: pwsh
@@ -29,7 +38,7 @@ jobs:
         run: |
           wsl.exe --install --distribution Ubuntu-24.04 --no-launch --web-download
           if ($LASTEXITCODE -ne 0) { throw 'Installing the WSL guest failed.' }
-          wsl.exe --distribution Ubuntu-24.04 --user root --exec /bin/bash -lc 'set -e; test -c /dev/net/tun; test -c /dev/kvm; apt-get -qq update; DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends docker.io docker-buildx iproute2 tesseract-ocr; service docker start; docker info --format "{{.OSType}}" | grep -Fx linux; docker buildx version'
+          wsl.exe --distribution Ubuntu-24.04 --user root --exec /bin/bash -lc 'set -e; test -c /dev/net/tun; apt-get -qq update; DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends docker.io docker-buildx iproute2 tesseract-ocr; service docker start; docker info --format "{{.OSType}}" | grep -Fx linux; docker buildx version'
           if ($LASTEXITCODE -ne 0) { throw 'A compatible Linux Docker host was not available in WSL 2.' }
       - name: Build the exact Linux test images in WSL
         shell: pwsh
@@ -68,7 +77,7 @@ jobs:
         shell: pwsh
         run: |
           $imageRevision = $env:PXE_SOURCE.Substring(0,10)
-          wsl.exe -d Ubuntu-24.04 --user root --cd "/var/tmp/pxe-windows-source-$env:PXE_SOURCE" --exec env PXE_NATIVE_PXE_TEST=1 PXE_NATIVE_PXE_BACKEND=rust-docker PXE_NATIVE_PXE_ARCH=amd64 PYTHONUNBUFFERED=1 "PXE_RUST_GUIDED_DOCKER_IMAGE=pxe-guided-${imageRevision}:local" "PXE_NATIVE_PXE_IMAGE=pxe-native-e2e-${imageRevision}:local" python3 tests/integration/test_windows_pxe_isolated.py --server-only
+          wsl.exe -d Ubuntu-24.04 --user root --cd "/var/tmp/pxe-windows-source-$env:PXE_SOURCE" --exec env PXE_NATIVE_PXE_TEST=1 PXE_NATIVE_PXE_BACKEND=rust-docker PXE_NATIVE_PXE_ARCH=amd64 PYTHONUNBUFFERED=1 "PXE_RUST_GUIDED_DOCKER_IMAGE=pxe-guided-${imageRevision}:local" "PXE_NATIVE_PXE_IMAGE=pxe-native-e2e-${imageRevision}:local" python3 tests/integration/test_windows_pxe_isolated.py --server-only --accelerator $env:PXE_ACCELERATOR
           if ($LASTEXITCODE -ne 0) { throw 'The isolated Rust PXE listener did not become reachable.' }
       - name: Verify and prepare the real media in the runner temporary directory
         shell: pwsh
@@ -150,7 +159,7 @@ jobs:
           $media = (wsl.exe -d Ubuntu-24.04 --exec wslpath -a -u "$output").Trim()
           if ($LASTEXITCODE -ne 0 -or $media -notmatch '^/mnt/[a-z]/') { throw 'The isolated media path could not be shared with WSL.' }
           $imageRevision = $env:PXE_SOURCE.Substring(0,10)
-          wsl.exe -d Ubuntu-24.04 --user root --cd "/var/tmp/pxe-windows-source-$env:PXE_SOURCE" --exec env DOCKER_BUILDKIT=1 PXE_NATIVE_PXE_TEST=1 PXE_NATIVE_PXE_BACKEND=rust-docker PXE_NATIVE_PXE_ARCH=amd64 PYTHONUNBUFFERED=1 "PXE_RUST_GUIDED_DOCKER_IMAGE=pxe-guided-${imageRevision}:local" "PXE_NATIVE_PXE_IMAGE=pxe-native-e2e-${imageRevision}:local" python3 tests/integration/test_windows_pxe_isolated.py "$media"
+          wsl.exe -d Ubuntu-24.04 --user root --cd "/var/tmp/pxe-windows-source-$env:PXE_SOURCE" --exec env DOCKER_BUILDKIT=1 PXE_NATIVE_PXE_TEST=1 PXE_NATIVE_PXE_BACKEND=rust-docker PXE_NATIVE_PXE_ARCH=amd64 PYTHONUNBUFFERED=1 "PXE_RUST_GUIDED_DOCKER_IMAGE=pxe-guided-${imageRevision}:local" "PXE_NATIVE_PXE_IMAGE=pxe-native-e2e-${imageRevision}:local" python3 tests/integration/test_windows_pxe_isolated.py "$media" --accelerator $env:PXE_ACCELERATOR
           if ($LASTEXITCODE -ne 0) { throw 'The isolated Windows PXE deployment did not pass.' }
       - name: Remove the temporary media
         if: always() && env.PXE_MEDIA_TEMP != ''
