@@ -29,7 +29,7 @@ jobs:
         run: |
           wsl.exe --install --distribution Ubuntu-24.04 --no-launch --web-download
           if ($LASTEXITCODE -ne 0) { throw 'Installing the WSL guest failed.' }
-          wsl.exe --distribution Ubuntu-24.04 --user root --exec /bin/bash -lc 'set -e; test -c /dev/net/tun; test -c /dev/kvm; apt-get -qq update; DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends docker.io docker-buildx iproute2; service docker start; docker info --format "{{.OSType}}" | grep -Fx linux; docker buildx version'
+          wsl.exe --distribution Ubuntu-24.04 --user root --exec /bin/bash -lc 'set -e; test -c /dev/net/tun; test -c /dev/kvm; apt-get -qq update; DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends docker.io docker-buildx iproute2 tesseract-ocr; service docker start; docker info --format "{{.OSType}}" | grep -Fx linux; docker buildx version'
           if ($LASTEXITCODE -ne 0) { throw 'A compatible Linux Docker host was not available in WSL 2.' }
       - name: Build the exact Linux test images in WSL
         shell: pwsh
