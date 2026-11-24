@@ -64,6 +64,12 @@ jobs:
           } finally {
             Remove-Item -LiteralPath $script -Force
           }
+      - name: Verify the isolated Rust listener before downloading the media
+        shell: pwsh
+        run: |
+          $imageRevision = $env:PXE_SOURCE.Substring(0,10)
+          wsl.exe -d Ubuntu-24.04 --user root --cd "/var/tmp/pxe-windows-source-$env:PXE_SOURCE" --exec env PXE_NATIVE_PXE_TEST=1 PXE_NATIVE_PXE_BACKEND=rust-docker PXE_NATIVE_PXE_ARCH=amd64 PYTHONUNBUFFERED=1 "PXE_RUST_GUIDED_DOCKER_IMAGE=pxe-guided-${imageRevision}:local" "PXE_NATIVE_PXE_IMAGE=pxe-native-e2e-${imageRevision}:local" python3 tests/integration/test_windows_pxe_isolated.py --server-only
+          if ($LASTEXITCODE -ne 0) { throw 'The isolated Rust PXE listener did not become reachable.' }
       - name: Verify and prepare the real media in the runner temporary directory
         shell: pwsh
         run: |
