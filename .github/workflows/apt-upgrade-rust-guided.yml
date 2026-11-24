@@ -1,0 +1,75 @@
+name: Upgrade beta 12 to the Rust guided package
+
+on:
+  workflow_dispatch:
+    inputs:
+      source:
+        description: Exact PXE Tools candidate commit
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  upgrade:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        scenario: [base, ansible-proxy]
+    env:
+      SOURCE_COMMIT: ${{ inputs.source }}
+      BUILD_RUN: ${{ github.run_id }}
+      SCENARIO: ${{ matrix.scenario }}
+    steps:
+      - name: Validate source
+        run: '[[ "$SOURCE_COMMIT" =~ ^[a-f0-9]{40}$ ]]'
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: williamboglietti/pxe-tools
+          ref: ${{ inputs.source }}
+          path: pxe-tools
+          persist-credentials: false
+      - name: Build unpublished Rust candidates
+        working-directory: pxe-tools
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
+          rustup toolchain install 1.96.0 --profile minimal
+          cargo +1.96.0 build --locked --release --manifest-path rust/Cargo.toml
+          strip rust/target/release/pxe-tools-rust
+          out="$GITHUB_WORKSPACE/candidate"
+          install -d "$out"
+          python3 - "$out/pxe-tools_0.1.0-rust1_amd64.deb" <<'PY'
+          import importlib.util
+          from pathlib import Path
+          import sys
+          spec = importlib.util.spec_from_file_location("builder", "packaging/native/build-local-package.py")
+          builder = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(builder)
+          builder.build(Path(sys.argv[1]), "0.1.0~rust1", package_name="pxe-tools",
+                        architecture="amd64", maintainer="PXE Tools <security@pxetools.com>",
+                        rust_guided=True, rust_binary=Path("rust/target/release/pxe-tools-rust").resolve())
+          PY
+          python3 packaging/native/build-local-ansible-package.py "$out/pxe-tools-ansible_0.1.0-rust1_all.deb" --version 0.1.0~rust1 --release
+          sha256sum "$out/pxe-tools_0.1.0-rust1_amd64.deb" | cut -d' ' -f1 > "$out/package.sha256"
+          sha256sum "$out/pxe-tools-ansible_0.1.0-rust1_all.deb" | cut -d' ' -f1 > "$out/ansible-package.sha256"
+          printf '%s\n' "$SOURCE_COMMIT" > "$out/source-commit.txt"
+          dependencies=$(dpkg-deb --field "$out/pxe-tools_0.1.0-rust1_amd64.deb" Depends)
+          ! printf '%s\n' "$dependencies" | grep -E '(^|[ ,])(nginx|php)[^ ,]*'
+      - name: Prepare the guided upgrade fixture
+        run: python3 apt-upgrade/prepare-guided.py
+      - name: Exercise the real package upgrade under systemd
+        run: bash apt-upgrade/runner.sh
+      - name: Archive the disposable upgrade receipt
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        with:
+          name: upgrade-rust-${{ matrix.scenario }}
+          path: upgrade-proof/
+          retention-days: 7
