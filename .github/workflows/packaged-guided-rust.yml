@@ -19,6 +19,11 @@ on:
           - both
           - apt
           - docker
+      raid_level:
+        description: GPT RAID recipe for the amd64 APT client
+        type: choice
+        options: ['1', '5']
+        default: '1'
 
 permissions:
   contents: read
@@ -39,6 +44,7 @@ jobs:
       PXE_ARCH: ${{ matrix.arch }}
       PXE_VARIANT: ${{ matrix.variant }}
       ARCH_FILTER: ${{ inputs.architecture }}
+      PXE_RAID_LEVEL: ${{ inputs.raid_level }}
     steps:
       - name: Validate the exact revision
         if: (inputs.architecture == 'both' || inputs.architecture == matrix.arch) && (inputs.variant == 'both' || inputs.variant == matrix.variant)
@@ -94,5 +100,6 @@ jobs:
             sudo mknod /dev/net/tun c 10 200
           fi
           sudo -- env PXE_NATIVE_PXE_TEST=1 PXE_NATIVE_PXE_ARCH="$PXE_ARCH" PXE_NATIVE_PXE_BACKEND="rust-$PXE_VARIANT" \
+            PXE_NATIVE_PXE_RAID_LEVEL="$PXE_RAID_LEVEL" \
             PXE_NATIVE_PXE_IMAGE="$PXE_NATIVE_PXE_IMAGE" PXE_RUST_GUIDED_DOCKER_IMAGE="$PXE_RUST_GUIDED_DOCKER_IMAGE" \
             PYTHONUNBUFFERED=1 python3 tests/integration/test_native_discovery_install_chain_isolated.py
