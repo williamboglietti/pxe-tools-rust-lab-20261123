@@ -31,89 +31,16 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Installing the WSL guest failed.' }
           wsl.exe --distribution Ubuntu-24.04 --user root --exec /bin/bash -lc 'set -e; test -c /dev/net/tun; test -c /dev/kvm; apt-get -qq update; DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends docker.io iproute2; service docker start; docker info --format "{{.OSType}}" | grep -Fx linux'
           if ($LASTEXITCODE -ne 0) { throw 'A compatible Linux Docker host was not available in WSL 2.' }
-      - name: Verify and prepare the real media in the runner temporary directory
+      - name: Build the exact Linux test images in WSL
         shell: pwsh
         run: |
-          $ErrorActionPreference = 'Stop'
-          if ((git rev-parse HEAD) -cne $env:PXE_SOURCE) { throw 'Unexpected source revision.' }
-          $temp = Join-Path $env:RUNNER_TEMP ('pxe-winpe-' + [guid]::NewGuid().ToString())
-          $null = New-Item -ItemType Directory -Path $temp
-
-          function Fetch([string]$Url, [string]$Destination) {
-            & curl.exe --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --retry 2 --max-time 700 --output "$Destination" "$Url"
-            if ($LASTEXITCODE -ne 0) { throw 'Unable to retrieve the test media.' }
-          }
-
-          try {
-            $ipxeArchive = Join-Path $temp 'ipxe.tar.gz'
-            Fetch 'https://github.com/ipxe/ipxe/releases/download/v2.0.0/ipxeboot.tar.gz' $ipxeArchive
-            if ((Get-FileHash -LiteralPath $ipxeArchive -Algorithm SHA256).Hash -ne '01a526d4cc791fc30362259c609d6c506cc64a7bdff51b9a5eb788354e17eee1') { throw 'Signed iPXE archive differs from the approved hash.' }
-            $ipxe = (New-Item -ItemType Directory -Path (Join-Path $temp 'ipxe')).FullName
-            tar.exe -xzf $ipxeArchive -C $ipxe --strip-components 2 ipxeboot/x86_64-sb/shimx64.efi ipxeboot/x86_64-sb/ipxe.efi
-            if ($LASTEXITCODE -ne 0) { throw 'Could not extract the two signed iPXE files.' }
-            # The release name ipxe-shim.efi is a symlink to the signed shim.
-            Move-Item -LiteralPath (Join-Path $ipxe 'shimx64.efi') -Destination (Join-Path $ipxe 'ipxe-shim.efi')
-            if (-not (Test-Path -LiteralPath (Join-Path $ipxe 'ipxe.efi') -PathType Leaf)) { throw 'Signed iPXE EFI file is missing.' }
-
-            $adk = Join-Path $temp 'adksetup.exe'
-            $pe = Join-Path $temp 'adkwinpesetup.exe'
-            Fetch 'https://download.microsoft.com/download/8e0c0f5a-abb5-4358-a51b-168eb40b1590/adk/adksetup.exe' $adk
-            Fetch 'https://download.microsoft.com/download/a4a79e7a-f085-41c4-aebf-2538fd000790/adkwinpeaddons/adkwinpesetup.exe' $pe
-            foreach ($installer in @($adk, $pe)) {
-              $signature = Get-AuthenticodeSignature -LiteralPath $installer
-              if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch '(?:^|, )O=Microsoft Corporation(?:,|$)') {
-                throw 'The ADK installer is not signed by Microsoft.'
-              }
-            }
-            $adkProcess = Start-Process -FilePath $adk -ArgumentList '/quiet','/norestart','/ceip','off','/features','OptionId.DeploymentTools' -Wait -PassThru
-            if ($adkProcess.ExitCode -ne 0) { throw "ADK installer failed with exit code $($adkProcess.ExitCode)." }
-            $peProcess = Start-Process -FilePath $pe -ArgumentList '/quiet','/norestart','/ceip','off','/features','OptionId.WindowsPreinstallationEnvironment' -Wait -PassThru
-            if ($peProcess.ExitCode -ne 0) { throw "WinPE installer failed with exit code $($peProcess.ExitCode)." }
-            Write-Output 'Microsoft ADK Deployment Tools and WinPE are installed on the runner.'
-
-            $iso = Join-Path $temp 'windows.iso'
-            $wimboot = Join-Path $temp 'wimboot'
-            $isoHash = 'BC3F24086EBADC94489066B5AD78089E2CF5C3491E90E790BB81A2B199C10E38'
-            $wimbootHash = '5f067ccdc4d084d5bf77b6c853bd0f8402dfc2b4cd1b103d358993ae97fae8e3'
-            Fetch 'https://software-static.download.prss.microsoft.com/dbazure/26300.9457.260913-1737.26h2_ge_release_svc_refresh_CLIENTENTERPRISEEVAL_OEMRET_x64FRE_en-us.iso' $iso
-            Fetch 'https://github.com/ipxe/wimboot/releases/download/v2.9.0/wimboot' $wimboot
-            if ((Get-FileHash -LiteralPath $iso -Algorithm SHA256).Hash -ne $isoHash) { throw 'Windows evaluation ISO differs from the Microsoft hash.' }
-            $registered = Mount-DiskImage -ImagePath $iso -Access ReadOnly -PassThru
-            try {
-              $volume = $registered | Get-Volume
-              $imagePath = "$($volume.DriveLetter):\sources\install.wim"
-              $results = @(Get-WindowsImage -ImagePath $imagePath | Where-Object { $_.ImageName -eq 'Windows 11 Enterprise Evaluation' })
-              if ($results.Count -ne 1) { throw 'Expected one Windows 11 Enterprise evaluation image.' }
-              $index = $results[0].ImageIndex
-            } finally {
-              Dismount-DiskImage -ImagePath $iso | Out-Null
-            }
-
-            $output = Join-Path $temp 'prepared'
-            & ./tests/support/windows-pxe/prepare-winpe.ps1 -WindowsIso $iso -WindowsIsoSha256 $isoHash -Wimboot $wimboot -WimbootSha256 $wimbootHash -OutputDirectory $output -GuestId ([guid]::NewGuid()) -DiskSerial 'PXE-WIN11-TEST' -Edition EnterpriseEval -InstallImageIndex $index
-            python tests/integration/verify_windows_pxe_deployment.py --case "$output\case.json" --iso "$iso" --winpe "$output\boot\boot.wim" --boot-root "$output\boot"
-            if ($LASTEXITCODE -ne 0) { throw 'Prepared media failed verification.' }
-            Write-Output 'Official Windows 11 Enterprise evaluation ISO and customized WinPE verified.'
-            Move-Item -LiteralPath $iso -Destination (Join-Path $output 'windows.iso')
-            Move-Item -LiteralPath $ipxe -Destination (Join-Path $output 'ipxe')
-            $ipxe = Join-Path $output 'ipxe'
-            $manifest = Join-Path $output 'case.json'
-            $case = Get-Content -LiteralPath $manifest -Raw | ConvertFrom-Json -AsHashtable
-            $case.ipxe_sha256 = @{}
-            foreach ($efi in @('ipxe-shim.efi','ipxe.efi')) {
-              $case.ipxe_sha256[$efi] = (Get-FileHash -LiteralPath (Join-Path $ipxe $efi) -Algorithm SHA256).Hash.ToLowerInvariant()
-            }
-            $case | ConvertTo-Json | Set-Content -LiteralPath $manifest -Encoding Ascii
-
-            $media = (wsl.exe -d Ubuntu-24.04 --exec wslpath -a -u "$output").Trim()
-            if ($LASTEXITCODE -ne 0 -or $media -notmatch '^/mnt/[a-z]/') { throw 'The isolated media path could not be shared with WSL.' }
-            $script = Join-Path $temp 'run-pxe.sh'
-            $bootstrap = @'
+          $script = Join-Path $env:RUNNER_TEMP 'pxe-build-linux-fixture.sh'
+          $bootstrap = @'
           #!/usr/bin/env bash
           set -euo pipefail
           pxe_source="$1"
-          pxe_media="$2"
-          pxe_checkout=$(mktemp -d /var/tmp/pxe-windows-source.XXXXXXXX)
+          pxe_checkout="/var/tmp/pxe-windows-source-$pxe_source"
+          mkdir "$pxe_checkout"
           git -C "$pxe_checkout" init -q
           git -C "$pxe_checkout" fetch --depth 1 https://github.com/williamboglietti/pxe-tools "$pxe_source"
           git -C "$pxe_checkout" checkout --detach FETCH_HEAD
@@ -126,13 +53,104 @@ jobs:
           FROM debian:13-slim
           RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl dnsmasq-base python3 qemu-system-x86 qemu-utils && rm -rf /var/lib/apt/lists/*
           DOCKERFILE
-          export PXE_NATIVE_PXE_TEST=1 PXE_NATIVE_PXE_BACKEND=rust-docker PXE_NATIVE_PXE_ARCH=amd64 PYTHONUNBUFFERED=1
-          python3 tests/integration/test_windows_pxe_isolated.py "$pxe_media"
           '@
-            $bootstrap -replace "`r`n","`n" | Set-Content -LiteralPath $script -Encoding utf8NoBOM -NoNewline
+          $bootstrap -replace "`r`n","`n" | Set-Content -LiteralPath $script -Encoding utf8NoBOM -NoNewline
+          try {
             $linuxScript = (wsl.exe -d Ubuntu-24.04 --exec wslpath -a -u "$script").Trim()
-            wsl.exe -d Ubuntu-24.04 --user root --exec /bin/bash "$linuxScript" $env:PXE_SOURCE "$media"
-            if ($LASTEXITCODE -ne 0) { throw 'The isolated Windows PXE deployment did not pass.' }
+            if ($LASTEXITCODE -ne 0 -or $linuxScript -notmatch '^/mnt/[a-z]/') { throw 'The build script is unavailable in WSL.' }
+            wsl.exe -d Ubuntu-24.04 --user root --exec /bin/bash "$linuxScript" $env:PXE_SOURCE
+            if ($LASTEXITCODE -ne 0) { throw 'The isolated Linux test images could not be built.' }
           } finally {
-            Remove-Item -LiteralPath $temp -Recurse -Force
+            Remove-Item -LiteralPath $script -Force
           }
+      - name: Verify and prepare the real media in the runner temporary directory
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ((git rev-parse HEAD) -cne $env:PXE_SOURCE) { throw 'Unexpected source revision.' }
+          $temp = Join-Path $env:RUNNER_TEMP ('pxe-winpe-' + [guid]::NewGuid().ToString())
+          $null = New-Item -ItemType Directory -Path $temp
+          Add-Content -LiteralPath $env:GITHUB_ENV -Value ('PXE_MEDIA_TEMP=' + $temp)
+
+          function Fetch([string]$Url, [string]$Destination) {
+            & curl.exe --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --retry 2 --max-time 700 --output "$Destination" "$Url"
+            if ($LASTEXITCODE -ne 0) { throw 'Unable to retrieve the test media.' }
+          }
+
+          $ipxeArchive = Join-Path $temp 'ipxe.tar.gz'
+          Fetch 'https://github.com/ipxe/ipxe/releases/download/v2.0.0/ipxeboot.tar.gz' $ipxeArchive
+          if ((Get-FileHash -LiteralPath $ipxeArchive -Algorithm SHA256).Hash -ne '01a526d4cc791fc30362259c609d6c506cc64a7bdff51b9a5eb788354e17eee1') { throw 'Signed iPXE archive differs from the approved hash.' }
+          $ipxe = (New-Item -ItemType Directory -Path (Join-Path $temp 'ipxe')).FullName
+          tar.exe -xzf $ipxeArchive -C $ipxe --strip-components 2 ipxeboot/x86_64-sb/shimx64.efi ipxeboot/x86_64-sb/ipxe.efi
+          if ($LASTEXITCODE -ne 0) { throw 'Could not extract the two signed iPXE files.' }
+          # The release name ipxe-shim.efi is a symlink to the signed shim.
+          Move-Item -LiteralPath (Join-Path $ipxe 'shimx64.efi') -Destination (Join-Path $ipxe 'ipxe-shim.efi')
+          if (-not (Test-Path -LiteralPath (Join-Path $ipxe 'ipxe.efi') -PathType Leaf)) { throw 'Signed iPXE EFI file is missing.' }
+
+          $adk = Join-Path $temp 'adksetup.exe'
+          $pe = Join-Path $temp 'adkwinpesetup.exe'
+          Fetch 'https://download.microsoft.com/download/8e0c0f5a-abb5-4358-a51b-168eb40b1590/adk/adksetup.exe' $adk
+          Fetch 'https://download.microsoft.com/download/a4a79e7a-f085-41c4-aebf-2538fd000790/adkwinpeaddons/adkwinpesetup.exe' $pe
+          foreach ($installer in @($adk, $pe)) {
+            $signature = Get-AuthenticodeSignature -LiteralPath $installer
+            if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch '(?:^|, )O=Microsoft Corporation(?:,|$)') {
+              throw 'The ADK installer is not signed by Microsoft.'
+            }
+          }
+          $adkProcess = Start-Process -FilePath $adk -ArgumentList '/quiet','/norestart','/ceip','off','/features','OptionId.DeploymentTools' -Wait -PassThru
+          if ($adkProcess.ExitCode -ne 0) { throw "ADK installer failed with exit code $($adkProcess.ExitCode)." }
+          $peProcess = Start-Process -FilePath $pe -ArgumentList '/quiet','/norestart','/ceip','off','/features','OptionId.WindowsPreinstallationEnvironment' -Wait -PassThru
+          if ($peProcess.ExitCode -ne 0) { throw "WinPE installer failed with exit code $($peProcess.ExitCode)." }
+          Write-Output 'Microsoft ADK Deployment Tools and WinPE are installed on the runner.'
+
+          $iso = Join-Path $temp 'windows.iso'
+          $wimboot = Join-Path $temp 'wimboot'
+          $isoHash = 'BC3F24086EBADC94489066B5AD78089E2CF5C3491E90E790BB81A2B199C10E38'
+          $wimbootHash = '5f067ccdc4d084d5bf77b6c853bd0f8402dfc2b4cd1b103d358993ae97fae8e3'
+          Fetch 'https://software-static.download.prss.microsoft.com/dbazure/26300.9457.260913-1737.26h2_ge_release_svc_refresh_CLIENTENTERPRISEEVAL_OEMRET_x64FRE_en-us.iso' $iso
+          Fetch 'https://github.com/ipxe/wimboot/releases/download/v2.9.0/wimboot' $wimboot
+          if ((Get-FileHash -LiteralPath $iso -Algorithm SHA256).Hash -ne $isoHash) { throw 'Windows evaluation ISO differs from the Microsoft hash.' }
+          $registered = Mount-DiskImage -ImagePath $iso -Access ReadOnly -PassThru
+          try {
+            $volume = $registered | Get-Volume
+            $imagePath = "$($volume.DriveLetter):\sources\install.wim"
+            $results = @(Get-WindowsImage -ImagePath $imagePath | Where-Object { $_.ImageName -eq 'Windows 11 Enterprise Evaluation' })
+            if ($results.Count -ne 1) { throw 'Expected one Windows 11 Enterprise evaluation image.' }
+            $index = $results[0].ImageIndex
+          } finally {
+            Dismount-DiskImage -ImagePath $iso | Out-Null
+          }
+
+          $output = Join-Path $temp 'prepared'
+          & ./tests/support/windows-pxe/prepare-winpe.ps1 -WindowsIso $iso -WindowsIsoSha256 $isoHash -Wimboot $wimboot -WimbootSha256 $wimbootHash -OutputDirectory $output -GuestId ([guid]::NewGuid()) -DiskSerial 'PXE-WIN11-TEST' -Edition EnterpriseEval -InstallImageIndex $index
+          python tests/integration/verify_windows_pxe_deployment.py --case "$output\case.json" --iso "$iso" --winpe "$output\boot\boot.wim" --boot-root "$output\boot"
+          if ($LASTEXITCODE -ne 0) { throw 'Prepared media failed verification.' }
+          Write-Output 'Official Windows 11 Enterprise evaluation ISO and customized WinPE verified.'
+          Move-Item -LiteralPath $iso -Destination (Join-Path $output 'windows.iso')
+          Move-Item -LiteralPath $ipxe -Destination (Join-Path $output 'ipxe')
+          $ipxe = Join-Path $output 'ipxe'
+          $manifest = Join-Path $output 'case.json'
+          $case = Get-Content -LiteralPath $manifest -Raw | ConvertFrom-Json -AsHashtable
+          $case.ipxe_sha256 = @{}
+          foreach ($efi in @('ipxe-shim.efi','ipxe.efi')) {
+            $case.ipxe_sha256[$efi] = (Get-FileHash -LiteralPath (Join-Path $ipxe $efi) -Algorithm SHA256).Hash.ToLowerInvariant()
+          }
+          $case | ConvertTo-Json | Set-Content -LiteralPath $manifest -Encoding Ascii
+      - name: Verify WinPE PXE and the installed Windows boot
+        shell: pwsh
+        run: |
+          $output = Join-Path $env:PXE_MEDIA_TEMP 'prepared'
+          $media = (wsl.exe -d Ubuntu-24.04 --exec wslpath -a -u "$output").Trim()
+          if ($LASTEXITCODE -ne 0 -or $media -notmatch '^/mnt/[a-z]/') { throw 'The isolated media path could not be shared with WSL.' }
+          $imageRevision = $env:PXE_SOURCE.Substring(0,10)
+          wsl.exe -d Ubuntu-24.04 --user root --cd "/var/tmp/pxe-windows-source-$env:PXE_SOURCE" --exec env PXE_NATIVE_PXE_TEST=1 PXE_NATIVE_PXE_BACKEND=rust-docker PXE_NATIVE_PXE_ARCH=amd64 PYTHONUNBUFFERED=1 "PXE_RUST_GUIDED_DOCKER_IMAGE=pxe-guided-${imageRevision}:local" "PXE_NATIVE_PXE_IMAGE=pxe-native-e2e-${imageRevision}:local" python3 tests/integration/test_windows_pxe_isolated.py "$media"
+          if ($LASTEXITCODE -ne 0) { throw 'The isolated Windows PXE deployment did not pass.' }
+      - name: Remove the temporary media
+        if: always() && env.PXE_MEDIA_TEMP != ''
+        shell: pwsh
+        run: |
+          $path = Get-Item -LiteralPath $env:PXE_MEDIA_TEMP
+          if ($path.Parent.FullName -ne $env:RUNNER_TEMP -or $path.Name -notmatch '^pxe-winpe-[0-9a-f-]{36}$') {
+            throw 'Unexpected temporary media directory.'
+          }
+          Remove-Item -LiteralPath $path.FullName -Recurse -Force
